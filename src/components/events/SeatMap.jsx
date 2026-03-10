@@ -1,10 +1,6 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
 import { formatCurrency } from '../../utils/formatCurrency'
 
-function seatId(sectionKey, index) {
-  return `${sectionKey}::${index}`
-}
-
 function Tooltip({ x, y, text }) {
   if (!text) return null
   return (
@@ -58,6 +54,12 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
   const [activeGA, setActiveGA] = useState(null)
   const [gaQuantities, setGaQuantities] = useState({})
 
+  // Use refs for mutable state that event handlers need access to
+  const selectedSeatsRef = useRef(selectedSeats)
+  const onSelectionChangeRef = useRef(onSelectionChange)
+  selectedSeatsRef.current = selectedSeats
+  onSelectionChangeRef.current = onSelectionChange
+
   const sections = seatMapData?.sections || []
   const categories = seatMapData?.categories || []
 
@@ -73,13 +75,8 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
     return map
   }, [categories])
 
-  const selectedSet = useMemo(() => {
-    const set = new Set()
-    for (const s of selectedSeats) set.add(s.id)
-    return set
-  }, [selectedSeats])
-
-  // Core: attach click/hover handlers to the SVG circles after rendering
+  // One-time setup: attach event handlers to SVG circles after initial render
+  // Uses refs so handlers always see latest selectedSeats without re-attaching
   useEffect(() => {
     const container = containerRef.current
     if (!container || !svgContent) return
@@ -88,8 +85,6 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
     if (!svgEl) return
 
     const cleanups = []
-
-    // Process each section group in the SVG
     const sectionGroups = svgEl.querySelectorAll('g[data-section-key]')
 
     for (const group of sectionGroups) {
@@ -102,7 +97,6 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
       const sectionName = meta?.name || category?.name || 'Section'
 
       if (sectionType === 'GA') {
-        // GA sections: click to open quantity picker
         group.style.cursor = 'pointer'
         const handler = () => setActiveGA(prev => prev === sectionKey ? null : sectionKey)
         group.addEventListener('click', handler)
@@ -110,53 +104,49 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
         continue
       }
 
-      // SEATED and TABLE sections: make individual circles clickable
+      // Get seat circles
       const circles = group.querySelectorAll('circle')
-
-      // For TABLE sections, skip the first circle (it's the table body)
-      // Table seats have data-table-seat attribute
       const seatCircles = sectionType === 'TABLE'
         ? Array.from(circles).filter(c => c.hasAttribute('data-table-seat'))
         : Array.from(circles)
 
       seatCircles.forEach((circle, index) => {
-        const id = seatId(sectionKey, index)
-        const originalFill = circle.getAttribute('fill')
-        const originalOpacity = circle.getAttribute('opacity') || '1'
-        const originalR = circle.getAttribute('r')
+        const seatId = `${sectionKey}::${index}`
 
-        // Store original attrs
-        circle.dataset.seatId = id
-        circle.dataset.originalFill = originalFill
-        circle.dataset.originalOpacity = originalOpacity
-        circle.dataset.originalR = originalR
+        // Store metadata on the element
+        circle.dataset.seatId = seatId
+        circle.dataset.origFill = circle.getAttribute('fill')
+        circle.dataset.origOpacity = circle.getAttribute('opacity') || ''
+        circle.dataset.origR = circle.getAttribute('r')
+        circle.dataset.color = color
         circle.style.cursor = 'pointer'
         circle.style.transition = 'all 0.12s ease'
 
         const onClick = () => {
+          const current = selectedSeatsRef.current
+          const currentIds = new Set(current.map(s => s.id))
+
           if (sectionType === 'TABLE' && meta?.bookingMode === 'whole-table') {
-            // Toggle all seats in the table
-            const allIds = seatCircles.map((_, i) => seatId(sectionKey, i))
-            const anySelected = allIds.some(sid => selectedSet.has(sid))
+            const allIds = seatCircles.map((_, i) => `${sectionKey}::${i}`)
+            const anySelected = allIds.some(id => currentIds.has(id))
             if (anySelected) {
               const removeSet = new Set(allIds)
-              onSelectionChange?.(selectedSeats.filter(s => !removeSet.has(s.id)))
+              onSelectionChangeRef.current?.(current.filter(s => !removeSet.has(s.id)))
             } else {
-              const newSeats = allIds.map(sid => ({
-                id: sid,
+              const newSeats = allIds.map(id => ({
+                id,
                 sectionKey,
                 categoryId: category?.id || meta?.categoryId,
                 price,
               }))
-              onSelectionChange?.([...selectedSeats, ...newSeats])
+              onSelectionChangeRef.current?.([...current, ...newSeats])
             }
           } else {
-            // Toggle individual seat
-            if (selectedSet.has(id)) {
-              onSelectionChange?.(selectedSeats.filter(s => s.id !== id))
+            if (currentIds.has(seatId)) {
+              onSelectionChangeRef.current?.(current.filter(s => s.id !== seatId))
             } else {
-              onSelectionChange?.([...selectedSeats, {
-                id,
+              onSelectionChangeRef.current?.([...current, {
+                id: seatId,
                 sectionKey,
                 categoryId: category?.id || meta?.categoryId,
                 price,
@@ -166,10 +156,11 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
         }
 
         const onEnter = (e) => {
-          if (!selectedSet.has(id)) {
+          const currentIds = new Set(selectedSeatsRef.current.map(s => s.id))
+          if (!currentIds.has(seatId)) {
             circle.setAttribute('fill', '#ffffff')
-            circle.setAttribute('opacity', '0.9')
-            circle.setAttribute('r', String(parseFloat(originalR) * 1.4))
+            if (circle.dataset.origOpacity) circle.setAttribute('opacity', '0.9')
+            circle.setAttribute('r', String(parseFloat(circle.dataset.origR) * 1.5))
           }
           setTooltip({
             x: e.clientX,
@@ -179,10 +170,15 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
         }
 
         const onLeave = () => {
-          if (!selectedSet.has(id)) {
-            circle.setAttribute('fill', originalFill)
-            circle.setAttribute('opacity', originalOpacity)
-            circle.setAttribute('r', originalR)
+          const currentIds = new Set(selectedSeatsRef.current.map(s => s.id))
+          if (!currentIds.has(seatId)) {
+            circle.setAttribute('fill', circle.dataset.origFill)
+            if (circle.dataset.origOpacity) {
+              circle.setAttribute('opacity', circle.dataset.origOpacity)
+            } else {
+              circle.removeAttribute('opacity')
+            }
+            circle.setAttribute('r', circle.dataset.origR)
           }
           setTooltip(null)
         }
@@ -202,9 +198,10 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
     return () => {
       for (const fn of cleanups) fn()
     }
-  }, [svgContent, sectionLookup, categoryLookup, selectedSeats, selectedSet, onSelectionChange])
+  // Only re-run when SVG content or metadata changes, NOT on selection changes
+  }, [svgContent, sectionLookup, categoryLookup])
 
-  // Update visual state of circles based on selection
+  // Update visual state when selection changes
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
@@ -212,26 +209,36 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
     const svgEl = container.querySelector('svg')
     if (!svgEl) return
 
-    const allSeatCircles = svgEl.querySelectorAll('circle[data-seat-id]')
-    for (const circle of allSeatCircles) {
+    const selectedIds = new Set(selectedSeats.map(s => s.id))
+    const allSeats = svgEl.querySelectorAll('circle[data-seat-id]')
+
+    for (const circle of allSeats) {
       const id = circle.dataset.seatId
-      const isSelected = selectedSet.has(id)
+      const isSelected = selectedIds.has(id)
+      const origFill = circle.dataset.origFill
+      const origR = circle.dataset.origR
+      const origOpacity = circle.dataset.origOpacity
+      const color = circle.dataset.color
 
       if (isSelected) {
         circle.setAttribute('fill', '#ffffff')
-        circle.setAttribute('opacity', '1')
-        circle.setAttribute('r', String(parseFloat(circle.dataset.originalR) * 1.5))
-        circle.setAttribute('stroke', circle.dataset.originalFill)
+        circle.setAttribute('r', String(parseFloat(origR) * 1.5))
+        circle.setAttribute('stroke', color)
         circle.setAttribute('stroke-width', '2')
+        circle.removeAttribute('opacity')
       } else {
-        circle.setAttribute('fill', circle.dataset.originalFill)
-        circle.setAttribute('opacity', circle.dataset.originalOpacity)
-        circle.setAttribute('r', circle.dataset.originalR)
+        circle.setAttribute('fill', origFill)
+        circle.setAttribute('r', origR)
         circle.removeAttribute('stroke')
         circle.removeAttribute('stroke-width')
+        if (origOpacity) {
+          circle.setAttribute('opacity', origOpacity)
+        } else {
+          circle.removeAttribute('opacity')
+        }
       }
     }
-  }, [selectedSet])
+  }, [selectedSeats])
 
   const handleGAQuantityChange = useCallback((sectionKey, quantity) => {
     const meta = sectionLookup[sectionKey]
@@ -239,18 +246,18 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
 
     setGaQuantities(prev => ({ ...prev, [sectionKey]: quantity }))
 
-    const otherSeats = selectedSeats.filter(s => s.sectionKey !== sectionKey)
+    const otherSeats = selectedSeatsRef.current.filter(s => s.sectionKey !== sectionKey)
     const gaSeats = []
     for (let i = 0; i < quantity; i++) {
       gaSeats.push({
-        id: seatId(sectionKey, i),
+        id: `${sectionKey}::${i}`,
         sectionKey,
         categoryId: category?.id || meta?.categoryId,
         price: category?.price || 0,
       })
     }
-    onSelectionChange?.([...otherSeats, ...gaSeats])
-  }, [selectedSeats, sectionLookup, categoryLookup, onSelectionChange])
+    onSelectionChangeRef.current?.([...otherSeats, ...gaSeats])
+  }, [sectionLookup, categoryLookup])
 
   if (!svgContent) return null
 
@@ -264,7 +271,6 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
           style={{ lineHeight: 0 }}
         />
 
-        {/* GA quantity picker overlay */}
         {activeGA && (
           <div
             className="absolute inset-0 bg-black/50 flex items-center justify-center z-10 backdrop-blur-sm"
