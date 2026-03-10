@@ -96,24 +96,26 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
       const price = category?.price || 0
       const sectionName = meta?.name || category?.name || 'Section'
 
-      // Make text and rect elements pass-through so clicks reach circles
-      group.querySelectorAll('text, rect').forEach(el => {
+      // Make ALL non-circle elements pass-through so clicks reach seat circles
+      // This covers: rect, text, inner <g> wrappers, etc.
+      group.querySelectorAll('*:not(circle)').forEach(el => {
         el.style.pointerEvents = 'none'
       })
 
       if (sectionType === 'GA') {
-        // For GA, the whole group is clickable — re-enable pointer events on the group itself
+        // For GA, the rect IS the clickable area — attach handler to the group
         group.style.cursor = 'pointer'
-        group.style.pointerEvents = 'auto'
-        // But keep text/rect pass-through so the group click fires
+        // Re-enable pointer events on the rect for GA
+        group.querySelectorAll('rect').forEach(el => {
+          el.style.pointerEvents = 'auto'
+        })
         const handler = () => setActiveGA(prev => prev === sectionKey ? null : sectionKey)
         group.addEventListener('click', handler)
         cleanups.push(() => group.removeEventListener('click', handler))
         continue
       }
 
-      // Get seat circles — for tables, only circles with data-table-seat are seats
-      // Make the table body circle (without data-table-seat) pass-through
+      // Get seat circles
       const circles = group.querySelectorAll('circle')
       let seatCircles
       if (sectionType === 'TABLE') {
@@ -122,11 +124,19 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
           if (c.hasAttribute('data-table-seat')) {
             seatCircles.push(c)
           } else {
+            // Table body circle — pass-through
             c.style.pointerEvents = 'none'
           }
         }
       } else {
         seatCircles = Array.from(circles)
+      }
+
+      // Ensure all seat circles are above other elements and clickable
+      // Move them to the end of the section group so they render on top
+      for (const c of seatCircles) {
+        c.style.pointerEvents = 'auto'
+        group.appendChild(c)
       }
 
       seatCircles.forEach((circle, index) => {
