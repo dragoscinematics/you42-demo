@@ -1,5 +1,9 @@
-import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { formatCurrency } from '../../utils/formatCurrency'
+
+function seatKey(sectionKey, rowLabel, seatNumber) {
+  return `${sectionKey}::${rowLabel}::${seatNumber}`
+}
 
 function Tooltip({ x, y, text }) {
   if (!text) return null
@@ -49,19 +53,15 @@ function GAQuantityPicker({ sectionName, price, available, selectedCount, onSele
 }
 
 export default function SeatMap({ svgContent, seatMapData, onSelectionChange, selectedSeats = [] }) {
-  const containerRef = useRef(null)
   const [tooltip, setTooltip] = useState(null)
+  const [hoveredSeat, setHoveredSeat] = useState(null)
   const [activeGA, setActiveGA] = useState(null)
   const [gaQuantities, setGaQuantities] = useState({})
 
-  // Use refs for mutable state that event handlers need access to
-  const selectedSeatsRef = useRef(selectedSeats)
-  const onSelectionChangeRef = useRef(onSelectionChange)
-  selectedSeatsRef.current = selectedSeats
-  onSelectionChangeRef.current = onSelectionChange
-
+  const layout = seatMapData?.layout
   const sections = seatMapData?.sections || []
   const categories = seatMapData?.categories || []
+  const layoutSections = layout?.sections || []
 
   const sectionLookup = useMemo(() => {
     const map = {}
@@ -75,231 +75,212 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
     return map
   }, [categories])
 
-  // One-time setup: attach event handlers to SVG circles after initial render
-  // Uses refs so handlers always see latest selectedSeats without re-attaching
-  useEffect(() => {
-    const container = containerRef.current
-    if (!container || !svgContent) return
+  const selectedSet = useMemo(() => {
+    const set = new Set()
+    for (const s of selectedSeats) set.add(seatKey(s.sectionKey, s.rowLabel, s.seatNumber))
+    return set
+  }, [selectedSeats])
 
-    const svgEl = container.querySelector('svg')
-    if (!svgEl) return
+  // Extract viewBox from server SVG
+  const viewBox = useMemo(() => {
+    const match = svgContent?.match(/viewBox="([^"]*)"/)
+    return match ? match[1] : '0 0 1000 800'
+  }, [svgContent])
 
-    const cleanups = []
-    const sectionGroups = svgEl.querySelectorAll('g[data-section-key]')
+  // Convert server SVG to a data URL for use as background
+  const svgDataUrl = useMemo(() => {
+    if (!svgContent) return null
+    // Remove any circles from section groups so we don't get double-rendering
+    // Strip the opacity groups (decorative seat dots) and table-seat circles
+    let cleaned = svgContent
+    // Remove the <g opacity="0.55">...</g> groups (decorative seat preview dots)
+    cleaned = cleaned.replace(/<g opacity="0\.55">[\s\S]*?<\/g>/g, '')
+    // Remove table-seat circles (we'll render our own)
+    cleaned = cleaned.replace(/<circle[^>]*data-table-seat[^>]*\/>/g, '')
+    // Remove table body circles too (the small center ones)
+    // They're the circles inside TABLE sections without data-table-seat
+    // We keep the rect, text, etc.
+    const blob = new Blob([cleaned], { type: 'image/svg+xml' })
+    return URL.createObjectURL(blob)
+  }, [svgContent])
 
-    for (const group of sectionGroups) {
-      const sectionKey = group.getAttribute('data-section-key')
-      const sectionType = group.getAttribute('data-section-type')
-      const meta = sectionLookup[sectionKey]
-      const category = meta ? categoryLookup[meta.categoryId] : null
-      const color = category?.color || '#666'
-      const price = category?.price || 0
-      const sectionName = meta?.name || category?.name || 'Section'
+  const handleSeatClick = useCallback((sectionKey, rowLabel, seatNumber, meta) => {
+    if (!meta || meta.available <= 0) return
 
-      // Make ALL non-circle elements pass-through so clicks reach seat circles
-      // This covers: rect, text, inner <g> wrappers, etc.
-      group.querySelectorAll('*:not(circle)').forEach(el => {
-        el.style.pointerEvents = 'none'
-      })
+    const category = categoryLookup[meta.categoryId]
+    const key = seatKey(sectionKey, rowLabel, seatNumber)
+    const isTable = meta.sectionType === 'TABLE'
+    const isWholeTable = isTable && meta.bookingMode === 'whole-table'
 
-      if (sectionType === 'GA') {
-        // For GA, the rect IS the clickable area — attach handler to the group
-        group.style.cursor = 'pointer'
-        // Re-enable pointer events on the rect for GA
-        group.querySelectorAll('rect').forEach(el => {
-          el.style.pointerEvents = 'auto'
-        })
-        const handler = () => setActiveGA(prev => prev === sectionKey ? null : sectionKey)
-        group.addEventListener('click', handler)
-        cleanups.push(() => group.removeEventListener('click', handler))
-        continue
-      }
+    let newSelection
 
-      // Get seat circles
-      const circles = group.querySelectorAll('circle')
-      let seatCircles
-      if (sectionType === 'TABLE') {
-        seatCircles = []
-        for (const c of circles) {
-          if (c.hasAttribute('data-table-seat')) {
-            seatCircles.push(c)
-          } else {
-            // Table body circle — pass-through
-            c.style.pointerEvents = 'none'
-          }
-        }
-      } else {
-        seatCircles = Array.from(circles)
-      }
-
-      // Ensure all seat circles are above other elements and clickable
-      // Move them to the end of the section group so they render on top
-      for (const c of seatCircles) {
-        c.style.pointerEvents = 'auto'
-        group.appendChild(c)
-      }
-
-      seatCircles.forEach((circle, index) => {
-        const seatId = `${sectionKey}::${index}`
-
-        // Store metadata on the element
-        circle.dataset.seatId = seatId
-        circle.dataset.origFill = circle.getAttribute('fill')
-        circle.dataset.origOpacity = circle.getAttribute('opacity') || ''
-        circle.dataset.origR = circle.getAttribute('r')
-        circle.dataset.color = color
-        circle.style.cursor = 'pointer'
-        circle.style.transition = 'all 0.12s ease'
-
-        const onClick = () => {
-          const current = selectedSeatsRef.current
-          const currentIds = new Set(current.map(s => s.id))
-
-          if (sectionType === 'TABLE' && meta?.bookingMode === 'whole-table') {
-            const allIds = seatCircles.map((_, i) => `${sectionKey}::${i}`)
-            const anySelected = allIds.some(id => currentIds.has(id))
-            if (anySelected) {
-              const removeSet = new Set(allIds)
-              onSelectionChangeRef.current?.(current.filter(s => !removeSet.has(s.id)))
-            } else {
-              const newSeats = allIds.map(id => ({
-                id,
-                sectionKey,
-                categoryId: category?.id || meta?.categoryId,
-                price,
-              }))
-              onSelectionChangeRef.current?.([...current, ...newSeats])
-            }
-          } else {
-            if (currentIds.has(seatId)) {
-              onSelectionChangeRef.current?.(current.filter(s => s.id !== seatId))
-            } else {
-              onSelectionChangeRef.current?.([...current, {
-                id: seatId,
-                sectionKey,
-                categoryId: category?.id || meta?.categoryId,
-                price,
-              }])
-            }
-          }
-        }
-
-        const onEnter = (e) => {
-          const currentIds = new Set(selectedSeatsRef.current.map(s => s.id))
-          if (!currentIds.has(seatId)) {
-            circle.setAttribute('fill', '#ffffff')
-            if (circle.dataset.origOpacity) circle.setAttribute('opacity', '0.9')
-            circle.setAttribute('r', String(parseFloat(circle.dataset.origR) * 1.5))
-          }
-          setTooltip({
-            x: e.clientX,
-            y: e.clientY,
-            text: `${sectionName} · Seat ${index + 1} – ${formatCurrency(price)}`,
+    if (isWholeTable) {
+      const tableSection = layoutSections.find(s => s.key === sectionKey)
+      if (!tableSection) return
+      const allTableSeats = []
+      for (const row of tableSection.rows || []) {
+        for (const seat of row.seats || []) {
+          allTableSeats.push({
+            sectionKey,
+            rowLabel: row.rowLabel,
+            seatNumber: seat.seatNumber,
+            categoryId: category?.id || meta.categoryId,
+            price: category?.price || 0,
           })
         }
-
-        const onLeave = () => {
-          const currentIds = new Set(selectedSeatsRef.current.map(s => s.id))
-          if (!currentIds.has(seatId)) {
-            circle.setAttribute('fill', circle.dataset.origFill)
-            if (circle.dataset.origOpacity) {
-              circle.setAttribute('opacity', circle.dataset.origOpacity)
-            } else {
-              circle.removeAttribute('opacity')
-            }
-            circle.setAttribute('r', circle.dataset.origR)
-          }
-          setTooltip(null)
-        }
-
-        circle.addEventListener('click', onClick)
-        circle.addEventListener('mouseenter', onEnter)
-        circle.addEventListener('mouseleave', onLeave)
-
-        cleanups.push(() => {
-          circle.removeEventListener('click', onClick)
-          circle.removeEventListener('mouseenter', onEnter)
-          circle.removeEventListener('mouseleave', onLeave)
-        })
-      })
-    }
-
-    return () => {
-      for (const fn of cleanups) fn()
-    }
-  // Only re-run when SVG content or metadata changes, NOT on selection changes
-  }, [svgContent, sectionLookup, categoryLookup])
-
-  // Update visual state when selection changes
-  useEffect(() => {
-    const container = containerRef.current
-    if (!container) return
-
-    const svgEl = container.querySelector('svg')
-    if (!svgEl) return
-
-    const selectedIds = new Set(selectedSeats.map(s => s.id))
-    const allSeats = svgEl.querySelectorAll('circle[data-seat-id]')
-
-    for (const circle of allSeats) {
-      const id = circle.dataset.seatId
-      const isSelected = selectedIds.has(id)
-      const origFill = circle.dataset.origFill
-      const origR = circle.dataset.origR
-      const origOpacity = circle.dataset.origOpacity
-      const color = circle.dataset.color
-
-      if (isSelected) {
-        circle.setAttribute('fill', '#ffffff')
-        circle.setAttribute('r', String(parseFloat(origR) * 1.5))
-        circle.setAttribute('stroke', color)
-        circle.setAttribute('stroke-width', '2')
-        circle.removeAttribute('opacity')
+      }
+      const anySelected = allTableSeats.some(s => selectedSet.has(seatKey(s.sectionKey, s.rowLabel, s.seatNumber)))
+      if (anySelected) {
+        const tableKeys = new Set(allTableSeats.map(s => seatKey(s.sectionKey, s.rowLabel, s.seatNumber)))
+        newSelection = selectedSeats.filter(s => !tableKeys.has(seatKey(s.sectionKey, s.rowLabel, s.seatNumber)))
       } else {
-        circle.setAttribute('fill', origFill)
-        circle.setAttribute('r', origR)
-        circle.removeAttribute('stroke')
-        circle.removeAttribute('stroke-width')
-        if (origOpacity) {
-          circle.setAttribute('opacity', origOpacity)
-        } else {
-          circle.removeAttribute('opacity')
-        }
+        newSelection = [...selectedSeats, ...allTableSeats]
+      }
+    } else {
+      if (selectedSet.has(key)) {
+        newSelection = selectedSeats.filter(s => seatKey(s.sectionKey, s.rowLabel, s.seatNumber) !== key)
+      } else {
+        newSelection = [...selectedSeats, {
+          sectionKey,
+          rowLabel,
+          seatNumber,
+          categoryId: category?.id || meta.categoryId,
+          price: category?.price || 0,
+        }]
       }
     }
-  }, [selectedSeats])
+
+    onSelectionChange?.(newSelection)
+  }, [selectedSeats, selectedSet, onSelectionChange, layoutSections, categoryLookup])
+
+  const handleGAClick = useCallback((sectionKey) => {
+    setActiveGA(prev => prev === sectionKey ? null : sectionKey)
+  }, [])
 
   const handleGAQuantityChange = useCallback((sectionKey, quantity) => {
     const meta = sectionLookup[sectionKey]
     const category = meta ? categoryLookup[meta.categoryId] : null
+    const layoutSection = layoutSections.find(s => s.key === sectionKey)
 
     setGaQuantities(prev => ({ ...prev, [sectionKey]: quantity }))
 
-    const otherSeats = selectedSeatsRef.current.filter(s => s.sectionKey !== sectionKey)
+    const otherSeats = selectedSeats.filter(s => s.sectionKey !== sectionKey)
     const gaSeats = []
-    for (let i = 0; i < quantity; i++) {
-      gaSeats.push({
-        id: `${sectionKey}::${i}`,
-        sectionKey,
-        categoryId: category?.id || meta?.categoryId,
-        price: category?.price || 0,
-      })
+    if (quantity > 0 && layoutSection) {
+      const row = layoutSection.rows?.[0]
+      const rowLabel = row?.rowLabel || 'GA'
+      for (let i = 0; i < quantity; i++) {
+        const seat = row?.seats?.[i]
+        gaSeats.push({
+          sectionKey,
+          rowLabel,
+          seatNumber: seat?.seatNumber || String(i + 1),
+          categoryId: category?.id || meta?.categoryId,
+          price: category?.price || 0,
+        })
+      }
     }
-    onSelectionChangeRef.current?.([...otherSeats, ...gaSeats])
-  }, [sectionLookup, categoryLookup])
+    onSelectionChange?.([...otherSeats, ...gaSeats])
+  }, [selectedSeats, sectionLookup, categoryLookup, layoutSections, onSelectionChange])
 
-  if (!svgContent) return null
+  if (!svgContent || !layout) return null
 
   return (
     <div className="relative w-full">
       <div className="w-full overflow-auto rounded-lg border border-you42-surface-hover" style={{ WebkitOverflowScrolling: 'touch' }}>
-        <div
-          ref={containerRef}
-          className="w-full [&_svg]:w-full [&_svg]:h-auto [&_svg]:max-h-[65vh]"
-          dangerouslySetInnerHTML={{ __html: svgContent }}
-          style={{ lineHeight: 0 }}
-        />
+        <div className="relative" style={{ lineHeight: 0 }}>
+          {/* Server SVG as background image — provides stage, shapes, labels, legend */}
+          {svgDataUrl && (
+            <img
+              src={svgDataUrl}
+              alt=""
+              className="w-full h-auto max-h-[65vh]"
+              style={{ display: 'block' }}
+              draggable={false}
+            />
+          )}
 
+          {/* React-rendered interactive SVG overlay — exact same viewBox */}
+          <svg
+            viewBox={viewBox}
+            className="absolute inset-0 w-full h-full"
+            preserveAspectRatio="xMidYMid meet"
+          >
+            {/* Render clickable seats for each section */}
+            {layoutSections.map((section) => {
+              const meta = sectionLookup[section.key]
+              const sectionType = section.sectionType || meta?.sectionType || 'SEATED'
+              const category = meta ? categoryLookup[meta.categoryId] : null
+              const color = category?.color || '#666'
+              const price = category?.price || 0
+              const isUnavailable = meta && meta.available <= 0
+              const sectionName = section.name || meta?.name || category?.name || 'Section'
+
+              if (sectionType === 'GA') {
+                // GA: render a transparent clickable rect
+                return (
+                  <rect
+                    key={section.key}
+                    x={section.x}
+                    y={section.y}
+                    width={section.width || 500}
+                    height={section.height || 120}
+                    fill="transparent"
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => handleGAClick(section.key)}
+                  />
+                )
+              }
+
+              const isTable = sectionType === 'TABLE'
+              const seatRadius = isTable ? 5.5 : 4
+
+              return (
+                <g key={section.key}>
+                  {(section.rows || []).map((row) =>
+                    (row.seats || []).map((seat) => {
+                      const key = seatKey(section.key, row.rowLabel, seat.seatNumber)
+                      const isSelected = selectedSet.has(key)
+                      const isHovered = hoveredSeat === key
+
+                      return (
+                        <circle
+                          key={key}
+                          cx={seat.x}
+                          cy={seat.y}
+                          r={isSelected ? seatRadius * 1.5 : isHovered ? seatRadius * 1.4 : seatRadius}
+                          fill={isUnavailable ? '#2a2a2a' : isSelected ? '#ffffff' : isHovered ? '#ffffff' : color}
+                          fillOpacity={isSelected ? 1 : isUnavailable ? 0.2 : isHovered ? 0.9 : 0.7}
+                          stroke={isSelected ? color : 'none'}
+                          strokeWidth={isSelected ? 2 : 0}
+                          style={{
+                            cursor: isUnavailable ? 'not-allowed' : 'pointer',
+                            transition: 'all 0.12s ease',
+                          }}
+                          onClick={() => !isUnavailable && handleSeatClick(section.key, row.rowLabel, seat.seatNumber, meta)}
+                          onMouseEnter={(e) => {
+                            if (!isUnavailable) setHoveredSeat(key)
+                            setTooltip({
+                              x: e.clientX,
+                              y: e.clientY,
+                              text: `${sectionName} · Row ${row.rowLabel}, Seat ${seat.seatNumber} – ${formatCurrency(price)}`,
+                            })
+                          }}
+                          onMouseLeave={() => {
+                            setHoveredSeat(null)
+                            setTooltip(null)
+                          }}
+                        />
+                      )
+                    })
+                  )}
+                </g>
+              )
+            })}
+          </svg>
+        </div>
+
+        {/* GA quantity picker overlay */}
         {activeGA && (
           <div
             className="absolute inset-0 bg-black/50 flex items-center justify-center z-10 backdrop-blur-sm"
