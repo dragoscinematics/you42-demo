@@ -1,106 +1,194 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
 import { formatCurrency } from '../../utils/formatCurrency'
+
+function seatKey(sectionKey, rowLabel, seatNumber) {
+  return `${sectionKey}::${rowLabel}::${seatNumber}`
+}
+
+function Tooltip({ x, y, text }) {
+  if (!text) return null
+  return (
+    <div
+      className="fixed z-50 px-2.5 py-1.5 rounded text-xs font-medium text-white pointer-events-none whitespace-nowrap"
+      style={{
+        backgroundColor: 'rgba(0,0,0,0.9)',
+        border: '1px solid rgba(255,255,255,0.15)',
+        left: x,
+        top: y - 40,
+        transform: 'translateX(-50%)',
+      }}
+    >
+      {text}
+    </div>
+  )
+}
 
 function GAQuantityPicker({ sectionName, price, available, selectedCount, onSelect, onClose }) {
   const max = Math.min(available, 20)
-
   return (
     <div
-      className="bg-[#1a1a1a] border border-[#444] rounded-lg p-5 text-center min-w-[200px] shadow-xl"
+      className="bg-you42-surface border border-you42-border rounded-lg p-5 text-center min-w-50 shadow-xl"
       onClick={(e) => e.stopPropagation()}
     >
       <p className="text-white text-sm font-bold mb-1">{sectionName || 'General Admission'}</p>
-      <p className="text-[#888] text-xs mb-4">{formatCurrency(price)} each · {available} available</p>
+      <p className="text-you42-text-muted text-xs mb-4">{formatCurrency(price)} each · {available} available</p>
       <div className="flex items-center justify-center gap-4">
         <button
           onClick={() => onSelect(Math.max(0, selectedCount - 1))}
           disabled={selectedCount <= 0}
-          className="w-9 h-9 rounded-lg bg-[#2a2a2a] text-white text-lg flex items-center justify-center hover:bg-[#333] disabled:opacity-20 transition-colors"
-        >
-          −
-        </button>
+          className="w-9 h-9 rounded-lg bg-you42-surface-hover text-white text-lg flex items-center justify-center hover:bg-you42-border disabled:opacity-20 transition-colors"
+        >−</button>
         <span className="text-white text-xl font-bold w-8 text-center">{selectedCount}</span>
         <button
           onClick={() => onSelect(Math.min(max, selectedCount + 1))}
           disabled={selectedCount >= max}
-          className="w-9 h-9 rounded-lg bg-[#2a2a2a] text-white text-lg flex items-center justify-center hover:bg-[#333] disabled:opacity-20 transition-colors"
-        >
-          +
-        </button>
+          className="w-9 h-9 rounded-lg bg-you42-surface-hover text-white text-lg flex items-center justify-center hover:bg-you42-border disabled:opacity-20 transition-colors"
+        >+</button>
       </div>
-      <button
-        onClick={onClose}
-        className="mt-3 text-you42-text-secondary text-xs hover:text-white transition-colors"
-      >
+      <button onClick={onClose} className="mt-3 text-you42-text-secondary text-xs hover:text-white transition-colors">
         Done
       </button>
     </div>
   )
 }
 
-function QuantityPicker({ sectionName, sectionType, price, available, selectedCount, onSelect, onClose }) {
-  const isTable = sectionType === 'TABLE'
-  const label = isTable ? `Book ${sectionName}` : sectionName
-  const max = isTable ? 1 : Math.min(available, 20)
-
-  if (isTable) {
-    return (
-      <div
-        className="bg-[#1a1a1a] border border-[#444] rounded-lg p-5 text-center min-w-[220px] shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <p className="text-white text-sm font-bold mb-1">{label}</p>
-        <p className="text-[#888] text-xs mb-4">{formatCurrency(price)} · {available} seats</p>
-        <button
-          onClick={() => onSelect(selectedCount > 0 ? 0 : available)}
-          className={`px-5 py-2 rounded-lg text-sm font-medium transition-colors ${
-            selectedCount > 0
-              ? 'bg-red-600/20 text-red-400 hover:bg-red-600/30'
-              : 'bg-you42-blue text-white hover:bg-you42-blue-hover'
-          }`}
-        >
-          {selectedCount > 0 ? 'Remove Table' : 'Book Whole Table'}
-        </button>
-        <button
-          onClick={onClose}
-          className="mt-3 block mx-auto text-you42-text-secondary text-xs hover:text-white transition-colors"
-        >
-          Close
-        </button>
-      </div>
-    )
-  }
-
-  return <GAQuantityPicker
-    sectionName={sectionName}
-    price={price}
-    available={available}
-    selectedCount={selectedCount}
-    onSelect={onSelect}
-    onClose={onClose}
-  />
-}
-
-export default function SeatMap({ svgContent, seatMapData, onSelectionChange, selectedSections = {} }) {
+export default function SeatMap({ svgContent, seatMapData, onSelectionChange, selectedSeats = [] }) {
   const containerRef = useRef(null)
-  const [activeSection, setActiveSection] = useState(null)
+  const [tooltip, setTooltip] = useState(null)
+  const [activeGA, setActiveGA] = useState(null)
+  const [gaQuantities, setGaQuantities] = useState({})
 
+  const layout = seatMapData?.layout
   const sections = seatMapData?.sections || []
   const categories = seatMapData?.categories || []
+  const layoutSections = layout?.sections || []
 
-  // Build lookup for section metadata
-  const sectionLookup = {}
-  for (const s of sections) {
-    sectionLookup[s.sectionKey] = s
-  }
+  // Lookups
+  const sectionLookup = useMemo(() => {
+    const map = {}
+    for (const s of sections) map[s.sectionKey] = s
+    return map
+  }, [sections])
 
-  // Build category lookup
-  const categoryLookup = {}
-  for (const c of categories) {
-    categoryLookup[c.id] = c
-  }
+  const categoryLookup = useMemo(() => {
+    const map = {}
+    for (const c of categories) map[c.id] = c
+    return map
+  }, [categories])
 
-  // Attach click handlers to SVG section groups after render
+  const selectedSet = useMemo(() => {
+    const set = new Set()
+    for (const s of selectedSeats) set.add(seatKey(s.sectionKey, s.rowLabel, s.seatNumber))
+    return set
+  }, [selectedSeats])
+
+  // Strip decorative seat dots from server SVG so we render our own interactive ones
+  const cleanedSvg = useMemo(() => {
+    if (!svgContent) return ''
+    // Remove the <g opacity="0.55"> groups inside section groups (those are decorative seat dots)
+    // Also remove the section-shadow filter from section groups so our overlay seats aren't clipped
+    return svgContent
+      .replace(/<g opacity="0\.55">[\s\S]*?<\/g>/g, '')
+      // Make section group rects slightly more transparent so our seats show through
+      .replace(/(<rect[^>]*fill="url\(#grad-[^"]*\)"[^>]*opacity=")([^"]*)/g, '$10.3')
+  }, [svgContent])
+
+  // Extract viewBox from SVG
+  const viewBox = useMemo(() => {
+    const match = svgContent?.match(/viewBox="([^"]*)"/)
+    return match ? match[1] : '0 0 1000 800'
+  }, [svgContent])
+
+  const handleSeatClick = useCallback((sectionKey, rowLabel, seatNumber, meta) => {
+    if (!meta || meta.available <= 0) return
+
+    const category = meta.category || categoryLookup[meta.categoryId]
+    const isTable = meta.sectionType === 'TABLE'
+    const isWholeTable = isTable && meta.bookingMode === 'whole-table'
+    const key = seatKey(sectionKey, rowLabel, seatNumber)
+
+    let newSelection
+
+    if (isWholeTable) {
+      const tableSection = layoutSections.find(s => s.key === sectionKey)
+      if (!tableSection) return
+      const allTableSeats = []
+      for (const row of tableSection.rows || []) {
+        for (const seat of row.seats || []) {
+          allTableSeats.push({
+            sectionKey,
+            rowLabel: row.rowLabel,
+            seatNumber: seat.seatNumber,
+            categoryId: category?.id || meta.categoryId,
+            price: category?.price || 0,
+          })
+        }
+      }
+      const anySelected = allTableSeats.some(s => selectedSet.has(seatKey(s.sectionKey, s.rowLabel, s.seatNumber)))
+      if (anySelected) {
+        const tableKeys = new Set(allTableSeats.map(s => seatKey(s.sectionKey, s.rowLabel, s.seatNumber)))
+        newSelection = selectedSeats.filter(s => !tableKeys.has(seatKey(s.sectionKey, s.rowLabel, s.seatNumber)))
+      } else {
+        newSelection = [...selectedSeats, ...allTableSeats]
+      }
+    } else {
+      if (selectedSet.has(key)) {
+        newSelection = selectedSeats.filter(s => seatKey(s.sectionKey, s.rowLabel, s.seatNumber) !== key)
+      } else {
+        newSelection = [...selectedSeats, {
+          sectionKey,
+          rowLabel,
+          seatNumber,
+          categoryId: category?.id || meta.categoryId,
+          price: category?.price || 0,
+        }]
+      }
+    }
+
+    onSelectionChange?.(newSelection)
+  }, [selectedSeats, selectedSet, onSelectionChange, layoutSections, categoryLookup])
+
+  const handleGAClick = useCallback((sectionKey) => {
+    setActiveGA(prev => prev === sectionKey ? null : sectionKey)
+  }, [])
+
+  const handleGAQuantityChange = useCallback((sectionKey, quantity) => {
+    const meta = sectionLookup[sectionKey]
+    const category = categoryLookup[meta?.categoryId]
+    const layoutSection = layoutSections.find(s => s.key === sectionKey)
+
+    setGaQuantities(prev => ({ ...prev, [sectionKey]: quantity }))
+
+    const otherSeats = selectedSeats.filter(s => s.sectionKey !== sectionKey)
+    const gaSeats = []
+    if (quantity > 0 && layoutSection) {
+      const row = layoutSection.rows?.[0]
+      const rowLabel = row?.rowLabel || 'GA'
+      for (let i = 0; i < quantity; i++) {
+        const seat = row?.seats?.[i]
+        gaSeats.push({
+          sectionKey,
+          rowLabel,
+          seatNumber: seat?.seatNumber || String(i + 1),
+          categoryId: category?.id || meta?.categoryId,
+          price: category?.price || 0,
+        })
+      }
+    }
+    onSelectionChange?.([...otherSeats, ...gaSeats])
+  }, [selectedSeats, sectionLookup, categoryLookup, layoutSections, onSelectionChange])
+
+  const handleSeatHover = useCallback((e, sectionName, rowLabel, seatNumber, price) => {
+    setTooltip({
+      x: e.clientX,
+      y: e.clientY,
+      text: sectionName
+        ? `${sectionName} · Row ${rowLabel}, Seat ${seatNumber} – ${formatCurrency(price)}`
+        : `Row ${rowLabel}, Seat ${seatNumber} – ${formatCurrency(price)}`,
+    })
+  }, [])
+
+  // Attach GA click handlers to server SVG GA sections
   useEffect(() => {
     const container = containerRef.current
     if (!container || !svgContent) return
@@ -108,124 +196,114 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
     const svgEl = container.querySelector('svg')
     if (!svgEl) return
 
-    const sectionGroups = svgEl.querySelectorAll('g[data-section-key]')
+    const gaGroups = svgEl.querySelectorAll('g[data-section-type="GA"]')
+    const handlers = []
 
-    const handleClick = (e) => {
-      const group = e.currentTarget
-      const sectionKey = group.getAttribute('data-section-key')
-      if (sectionKey) {
-        setActiveSection(sectionKey)
-      }
-    }
-
-    for (const g of sectionGroups) {
+    for (const g of gaGroups) {
+      const sectionKey = g.getAttribute('data-section-key')
+      const handler = () => handleGAClick(sectionKey)
       g.style.cursor = 'pointer'
-      g.addEventListener('click', handleClick)
-
-      // Add hover effect
-      g.addEventListener('mouseenter', () => {
-        g.style.filter = 'brightness(1.2)'
-      })
-      g.addEventListener('mouseleave', () => {
-        g.style.filter = ''
-      })
+      g.addEventListener('click', handler)
+      handlers.push({ el: g, handler })
     }
 
     return () => {
-      for (const g of sectionGroups) {
-        g.removeEventListener('click', handleClick)
+      for (const { el, handler } of handlers) {
+        el.removeEventListener('click', handler)
       }
     }
-  }, [svgContent])
+  }, [svgContent, handleGAClick])
 
-  // Update SVG visual state when selections change
-  useEffect(() => {
-    const container = containerRef.current
-    if (!container) return
+  if (!svgContent || !layout) return null
 
-    const svgEl = container.querySelector('svg')
-    if (!svgEl) return
+  // Render interactive seat circles for SEATED and TABLE sections
+  const renderInteractiveSeats = () => {
+    const elements = []
 
-    const sectionGroups = svgEl.querySelectorAll('g[data-section-key]')
-    for (const g of sectionGroups) {
-      const key = g.getAttribute('data-section-key')
-      const qty = selectedSections[key] || 0
-      if (qty > 0) {
-        g.style.outline = '2px solid #fff'
-        g.style.outlineOffset = '2px'
-        g.style.borderRadius = '4px'
-      } else {
-        g.style.outline = ''
-        g.style.outlineOffset = ''
+    for (const section of layoutSections) {
+      const meta = sectionLookup[section.key]
+      const sectionType = section.sectionType || meta?.sectionType || 'SEATED'
+
+      // Skip GA sections (handled by overlay picker)
+      if (sectionType === 'GA') continue
+
+      const category = categoryLookup[meta?.categoryId]
+      const color = category?.color || '#666'
+      const isUnavailable = meta && meta.available <= 0
+      const isTable = sectionType === 'TABLE'
+      const seatRadius = isTable ? 5.5 : Math.min(7, (section.seatSpacing || 22) / 2.8)
+
+      for (const row of section.rows || []) {
+        for (const seat of row.seats || []) {
+          const key = seatKey(section.key, row.rowLabel, seat.seatNumber)
+          const isSelected = selectedSet.has(key)
+
+          elements.push(
+            <circle
+              key={key}
+              cx={seat.x}
+              cy={seat.y}
+              r={seatRadius}
+              fill={isUnavailable ? '#2a2a2a' : isSelected ? '#fff' : color}
+              fillOpacity={isSelected ? 1 : isUnavailable ? 0.2 : 0.7}
+              stroke={isSelected ? color : 'transparent'}
+              strokeWidth={isSelected ? 2.5 : 0}
+              style={{ cursor: isUnavailable ? 'not-allowed' : 'pointer', transition: 'all 0.12s ease' }}
+              onClick={() => !isUnavailable && handleSeatClick(section.key, row.rowLabel, seat.seatNumber, meta)}
+              onMouseEnter={(e) => handleSeatHover(e, section.name || meta?.name, row.rowLabel, seat.seatNumber, category?.price || 0)}
+              onMouseLeave={() => setTooltip(null)}
+            />
+          )
+        }
       }
     }
-  }, [selectedSections, svgContent])
 
-  const handleQuantityChange = useCallback((sectionKey, quantity) => {
-    const newSelections = { ...selectedSections, [sectionKey]: quantity }
-    if (quantity <= 0) delete newSelections[sectionKey]
-    onSelectionChange?.(newSelections)
-  }, [selectedSections, onSelectionChange])
-
-  if (!svgContent) return null
-
-  // Get active section info
-  const activeMeta = activeSection ? sectionLookup[activeSection] : null
-  const activeCategory = activeMeta ? categoryLookup[activeMeta.categoryId] : null
-  const activeSectionType = activeMeta?.sectionType || 'SEATED'
+    return elements
+  }
 
   return (
     <div className="relative w-full">
-      <div className="w-full overflow-auto rounded-lg border border-[#2a2a2a]" style={{ WebkitOverflowScrolling: 'touch' }}>
-        <div
-          ref={containerRef}
-          className="w-full"
-          dangerouslySetInnerHTML={{ __html: svgContent }}
-          style={{ lineHeight: 0 }}
-        />
+      <div className="w-full overflow-auto rounded-lg border border-you42-surface-hover" style={{ WebkitOverflowScrolling: 'touch' }}>
+        <div className="relative" style={{ lineHeight: 0 }}>
+          {/* Server-rendered SVG as background */}
+          <div
+            ref={containerRef}
+            className="w-full"
+            dangerouslySetInnerHTML={{ __html: cleanedSvg }}
+          />
 
-        {/* Section picker overlay */}
-        {activeSection && activeMeta && (
+          {/* Interactive seat overlay - positioned exactly over the SVG */}
+          <svg
+            viewBox={viewBox}
+            className="absolute inset-0 w-full h-full"
+            preserveAspectRatio="xMidYMid meet"
+            style={{ pointerEvents: 'none' }}
+          >
+            <g style={{ pointerEvents: 'auto' }}>
+              {renderInteractiveSeats()}
+            </g>
+          </svg>
+        </div>
+
+        {/* GA quantity picker overlay */}
+        {activeGA && (
           <div
             className="absolute inset-0 bg-black/50 flex items-center justify-center z-10 backdrop-blur-sm"
-            onClick={() => setActiveSection(null)}
+            onClick={() => setActiveGA(null)}
           >
-            <QuantityPicker
-              sectionName={activeMeta.name || activeCategory?.name || 'Section'}
-              sectionType={activeSectionType}
-              price={activeCategory?.price || 0}
-              available={activeMeta.available || 0}
-              selectedCount={selectedSections[activeSection] || 0}
-              onSelect={(qty) => handleQuantityChange(activeSection, qty)}
-              onClose={() => setActiveSection(null)}
+            <GAQuantityPicker
+              sectionName={sectionLookup[activeGA]?.name || 'General Admission'}
+              price={categoryLookup[sectionLookup[activeGA]?.categoryId]?.price || 0}
+              available={sectionLookup[activeGA]?.available || 0}
+              selectedCount={gaQuantities[activeGA] || 0}
+              onSelect={(qty) => handleGAQuantityChange(activeGA, qty)}
+              onClose={() => setActiveGA(null)}
             />
           </div>
         )}
       </div>
 
-      {/* Selection summary below map */}
-      {Object.keys(selectedSections).length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-2">
-          {Object.entries(selectedSections).map(([key, qty]) => {
-            const meta = sectionLookup[key]
-            const cat = meta ? categoryLookup[meta.categoryId] : null
-            return (
-              <span
-                key={key}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-[#222] border border-[#444] text-white"
-              >
-                {meta?.name || cat?.name || 'Section'} × {qty}
-                <button
-                  onClick={() => handleQuantityChange(key, 0)}
-                  className="text-[#888] hover:text-white ml-0.5"
-                >
-                  ×
-                </button>
-              </span>
-            )
-          })}
-        </div>
-      )}
+      {tooltip && <Tooltip x={tooltip.x} y={tooltip.y} text={tooltip.text} />}
     </div>
   )
 }

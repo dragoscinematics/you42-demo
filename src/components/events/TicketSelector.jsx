@@ -11,18 +11,16 @@ function matchCategoryToTicketType(categoryName, ticketTypes) {
   const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim()
   const catNorm = normalize(categoryName)
 
-  // Exact match
   const exact = ticketTypes.find(t => t.name === categoryName)
   if (exact) return exact
 
-  // Contains match
   const contains = ticketTypes.find(t => {
     const tNorm = normalize(t.name)
     return catNorm.includes(tNorm) || tNorm.includes(catNorm)
   })
   if (contains) return contains
 
-  // Word similarity (handles typos like "resered" -> "reserved")
+  // Levenshtein edit distance for typo tolerance
   let bestMatch = null
   let bestScore = -Infinity
   for (const tt of ticketTypes) {
@@ -34,7 +32,6 @@ function matchCategoryToTicketType(categoryName, ticketTypes) {
       for (const tw of ttWords) {
         const maxLen = Math.max(cw.length, tw.length)
         if (maxLen === 0) continue
-        let dist = 0
         const m = cw.length, n = tw.length
         const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0))
         for (let i = 0; i <= m; i++) dp[i][0] = i
@@ -42,8 +39,7 @@ function matchCategoryToTicketType(categoryName, ticketTypes) {
         for (let i = 1; i <= m; i++)
           for (let j = 1; j <= n; j++)
             dp[i][j] = cw[i-1] === tw[j-1] ? dp[i-1][j-1] : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
-        dist = dp[m][n]
-        const similarity = 1 - dist / maxLen
+        const similarity = 1 - dp[m][n] / maxLen
         if (similarity > bestWordScore) bestWordScore = similarity
       }
       score += bestWordScore
@@ -62,13 +58,12 @@ function ReservedSeatingSelector({ event }) {
   const [svgContent, setSvgContent] = useState(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(null)
-  const [selectedSections, setSelectedSections] = useState({})
+  const [selectedSeats, setSelectedSeats] = useState([])
   const [error, setError] = useState(null)
   const [addingSuccess, setAddingSuccess] = useState(false)
 
   const ticketTypes = event.ticketTypes || []
 
-  // Store price/allInPrice map in cart context
   useEffect(() => {
     if (ticketTypes.length === 0) return
     const priceMap = {}
@@ -78,7 +73,6 @@ function ReservedSeatingSelector({ event }) {
     setTicketTypePrices(priceMap)
   }, [ticketTypes, setTicketTypePrices])
 
-  // Fetch both seat map data (for metadata) and SVG (for rendering)
   useEffect(() => {
     let cancelled = false
     async function fetch() {
@@ -102,50 +96,39 @@ function ReservedSeatingSelector({ event }) {
     return () => { cancelled = true }
   }, [event.id])
 
-  const handleSelectionChange = useCallback((sections) => {
-    setSelectedSections(sections)
+  const handleSelectionChange = useCallback((seats) => {
+    setSelectedSeats(seats)
   }, [])
 
-  // Build summary from selections
+  // Group selected seats by category for summary
   const selectionSummary = useMemo(() => {
-    const groups = []
-    const sectionLookup = {}
-    for (const s of (seatMapData?.sections || [])) {
-      sectionLookup[s.sectionKey] = s
+    const groups = {}
+    for (const seat of selectedSeats) {
+      const catId = seat.categoryId || 'unknown'
+      if (!groups[catId]) {
+        const cat = seatMapData?.categories?.find(c => c.id === catId)
+        groups[catId] = {
+          categoryId: catId,
+          categoryName: cat?.name || 'Ticket',
+          price: seat.price,
+          count: 0,
+          seats: [],
+        }
+      }
+      groups[catId].count++
+      groups[catId].seats.push(seat)
     }
-    const categoryLookup = {}
-    for (const c of (seatMapData?.categories || [])) {
-      categoryLookup[c.id] = c
-    }
-
-    for (const [sectionKey, qty] of Object.entries(selectedSections)) {
-      if (qty <= 0) continue
-      const meta = sectionLookup[sectionKey]
-      const cat = meta ? categoryLookup[meta.categoryId] : null
-      groups.push({
-        sectionKey,
-        categoryId: meta?.categoryId,
-        categoryName: cat?.name || meta?.name || 'Ticket',
-        sectionType: meta?.sectionType || 'SEATED',
-        price: cat?.price || 0,
-        count: qty,
-      })
-    }
-    return groups
-  }, [selectedSections, seatMapData])
+    return Object.values(groups)
+  }, [selectedSeats, seatMapData])
 
   const totalPrice = useMemo(() => {
-    return selectionSummary.reduce((sum, g) => sum + g.price * g.count, 0)
-  }, [selectionSummary])
-
-  const totalCount = useMemo(() => {
-    return selectionSummary.reduce((sum, g) => sum + g.count, 0)
-  }, [selectionSummary])
+    return selectedSeats.reduce((sum, s) => sum + (s.price || 0), 0)
+  }, [selectedSeats])
 
   const handleAddToCart = async () => {
     setError(null)
     setAddingSuccess(false)
-    if (totalCount === 0) return
+    if (selectedSeats.length === 0) return
 
     try {
       for (const group of selectionSummary) {
@@ -159,8 +142,7 @@ function ReservedSeatingSelector({ event }) {
           quantity: group.count,
         })
       }
-
-      setSelectedSections({})
+      setSelectedSeats([])
       setAddingSuccess(true)
       setTimeout(() => setAddingSuccess(false), 3000)
     } catch (err) {
@@ -200,15 +182,14 @@ function ReservedSeatingSelector({ event }) {
         svgContent={svgContent}
         seatMapData={seatMapData}
         onSelectionChange={handleSelectionChange}
-        selectedSections={selectedSections}
+        selectedSeats={selectedSeats}
       />
 
-      {/* Selection summary */}
-      {totalCount > 0 && (
+      {selectedSeats.length > 0 && (
         <div className="mt-4 p-3 bg-you42-surface rounded-lg border border-you42-border">
           <p className="text-white text-sm font-semibold mb-2">Your Selection</p>
           {selectionSummary.map((group) => (
-            <div key={group.sectionKey} className="flex justify-between text-sm mb-1">
+            <div key={group.categoryId} className="flex justify-between text-sm mb-1">
               <span className="text-you42-text-secondary">
                 {group.count}x {group.categoryName}
               </span>
@@ -229,12 +210,12 @@ function ReservedSeatingSelector({ event }) {
 
       <button
         onClick={handleAddToCart}
-        disabled={totalCount === 0 || isLoading}
+        disabled={selectedSeats.length === 0 || isLoading}
         className="w-full mt-4 bg-you42-blue hover:bg-you42-blue-hover disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium py-2.5 rounded transition-colors"
       >
         {isLoading ? 'Adding...' :
-         totalCount > 0
-           ? `Add ${totalCount} Seat${totalCount > 1 ? 's' : ''} to Cart`
+         selectedSeats.length > 0
+           ? `Add ${selectedSeats.length} Seat${selectedSeats.length > 1 ? 's' : ''} to Cart`
            : 'Select Seats'}
       </button>
     </div>
@@ -293,9 +274,7 @@ function StandardTicketSelector({ event }) {
         <div className="border-b border-you42-border mt-2 mb-6" />
         <div className="text-center py-6">
           <p className="text-white font-semibold text-sm mb-1">Tickets Coming Soon</p>
-          <p className="text-you42-text-muted text-sm">
-            Check back shortly for ticket availability.
-          </p>
+          <p className="text-you42-text-muted text-sm">Check back shortly for ticket availability.</p>
         </div>
       </div>
     )
@@ -340,17 +319,13 @@ function StandardTicketSelector({ event }) {
                       onClick={() => updateQuantity(ticket.id, -1, 0, maxQty)}
                       disabled={qty <= 0}
                       className="w-7 h-7 rounded bg-you42-surface text-white text-sm flex items-center justify-center hover:bg-you42-surface-hover disabled:opacity-20 disabled:cursor-not-allowed transition-colors"
-                    >
-                      &minus;
-                    </button>
+                    >&minus;</button>
                     <span className="w-6 text-center text-white text-sm font-medium">{qty}</span>
                     <button
                       onClick={() => updateQuantity(ticket.id, 1, 0, maxQty)}
                       disabled={qty >= maxQty}
                       className="w-7 h-7 rounded bg-you42-surface text-white text-sm flex items-center justify-center hover:bg-you42-surface-hover disabled:opacity-20 disabled:cursor-not-allowed transition-colors"
-                    >
-                      +
-                    </button>
+                    >+</button>
                   </div>
                 ) : (
                   <span className="text-you42-text-muted text-xs">Sold Out</span>
