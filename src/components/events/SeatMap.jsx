@@ -96,19 +96,38 @@ export default function SeatMap({ svgContent, seatMapData, onSelectionChange, se
       const price = category?.price || 0
       const sectionName = meta?.name || category?.name || 'Section'
 
+      // Make text and rect elements pass-through so clicks reach circles
+      group.querySelectorAll('text, rect').forEach(el => {
+        el.style.pointerEvents = 'none'
+      })
+
       if (sectionType === 'GA') {
+        // For GA, the whole group is clickable — re-enable pointer events on the group itself
         group.style.cursor = 'pointer'
+        group.style.pointerEvents = 'auto'
+        // But keep text/rect pass-through so the group click fires
         const handler = () => setActiveGA(prev => prev === sectionKey ? null : sectionKey)
         group.addEventListener('click', handler)
         cleanups.push(() => group.removeEventListener('click', handler))
         continue
       }
 
-      // Get seat circles
+      // Get seat circles — for tables, only circles with data-table-seat are seats
+      // Make the table body circle (without data-table-seat) pass-through
       const circles = group.querySelectorAll('circle')
-      const seatCircles = sectionType === 'TABLE'
-        ? Array.from(circles).filter(c => c.hasAttribute('data-table-seat'))
-        : Array.from(circles)
+      let seatCircles
+      if (sectionType === 'TABLE') {
+        seatCircles = []
+        for (const c of circles) {
+          if (c.hasAttribute('data-table-seat')) {
+            seatCircles.push(c)
+          } else {
+            c.style.pointerEvents = 'none'
+          }
+        }
+      } else {
+        seatCircles = Array.from(circles)
+      }
 
       seatCircles.forEach((circle, index) => {
         const seatId = `${sectionKey}::${index}`
