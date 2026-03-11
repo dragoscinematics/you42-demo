@@ -1,7 +1,7 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useCart } from '../../context/CartContext'
 import { formatCurrency } from '../../utils/formatCurrency'
-import { getSeatMap, getSeatMapSvg } from '../../api/events'
+import { getSeatMap } from '../../api/events'
 import SeatMap from './SeatMap'
 
 // Fuzzy match category name to ticket type name
@@ -20,7 +20,6 @@ function matchCategoryToTicketType(categoryName, ticketTypes) {
   })
   if (contains) return contains
 
-  // Levenshtein edit distance for typo tolerance
   let bestMatch = null
   let bestScore = -Infinity
   for (const tt of ticketTypes) {
@@ -55,8 +54,6 @@ function matchCategoryToTicketType(categoryName, ticketTypes) {
 function ReservedSeatingSelector({ event }) {
   const { addItem, isLoading, setTicketTypePrices } = useCart()
   const [seatMapData, setSeatMapData] = useState(null)
-  const [svgContent, setSvgContent] = useState(null)
-  const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(null)
   const [selectedSeats, setSelectedSeats] = useState([])
   const [error, setError] = useState(null)
@@ -75,55 +72,36 @@ function ReservedSeatingSelector({ event }) {
 
   useEffect(() => {
     let cancelled = false
-    async function fetch() {
-      try {
-        setLoading(true)
-        const [data, svg] = await Promise.all([
-          getSeatMap(event.id),
-          getSeatMapSvg(event.id),
-        ])
-        if (!cancelled) {
-          setSeatMapData(data)
-          setSvgContent(svg)
-        }
-      } catch (err) {
-        if (!cancelled) setLoadError(err.message)
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
-    fetch()
+    getSeatMap(event.id)
+      .then(data => { if (!cancelled) setSeatMapData(data) })
+      .catch(err => { if (!cancelled) setLoadError(err.message) })
     return () => { cancelled = true }
   }, [event.id])
 
-  const handleSelectionChange = useCallback((seats) => {
-    setSelectedSeats(seats)
-  }, [])
+  const handleSeatClick = (seat) => {
+    setSelectedSeats(prev => {
+      const exists = prev.find(s => s.seatId === seat.seatId)
+      return exists ? prev.filter(s => s.seatId !== seat.seatId) : [...prev, seat]
+    })
+  }
 
-  // Group selected seats by category for summary
-  const selectionSummary = useMemo(() => {
+  // Group selected seats by category for summary + cart
+  const selectionGroups = useMemo(() => {
     const groups = {}
     for (const seat of selectedSeats) {
-      const catId = seat.categoryId || 'unknown'
-      if (!groups[catId]) {
-        const cat = seatMapData?.categories?.find(c => c.id === catId)
-        groups[catId] = {
-          categoryId: catId,
-          categoryName: cat?.name || 'Ticket',
-          price: seat.price,
-          count: 0,
-          seats: [],
-        }
+      const key = seat.categoryId || seat.categoryName || 'ticket'
+      if (!groups[key]) {
+        groups[key] = { categoryName: seat.categoryName, price: seat.price || 0, count: 0 }
       }
-      groups[catId].count++
-      groups[catId].seats.push(seat)
+      groups[key].count++
     }
     return Object.values(groups)
-  }, [selectedSeats, seatMapData])
-
-  const totalPrice = useMemo(() => {
-    return selectedSeats.reduce((sum, s) => sum + (s.price || 0), 0)
   }, [selectedSeats])
+
+  const totalPrice = useMemo(
+    () => selectedSeats.reduce((sum, s) => sum + (s.price || 0), 0),
+    [selectedSeats]
+  )
 
   const handleAddToCart = async () => {
     setError(null)
@@ -131,7 +109,7 @@ function ReservedSeatingSelector({ event }) {
     if (selectedSeats.length === 0) return
 
     try {
-      for (const group of selectionSummary) {
+      for (const group of selectionGroups) {
         const matchedTicketType = matchCategoryToTicketType(group.categoryName, ticketTypes)
         if (!matchedTicketType) {
           throw new Error(`No matching ticket type found for "${group.categoryName}"`)
@@ -150,25 +128,25 @@ function ReservedSeatingSelector({ event }) {
     }
   }
 
-  if (loading) {
-    return (
-      <div>
-        <h3 className="text-lg font-bold text-white">Select Your Seats</h3>
-        <div className="border-b border-you42-border mt-2 mb-4" />
-        <div className="flex items-center justify-center py-12">
-          <div className="w-6 h-6 border-2 border-you42-blue border-t-transparent rounded-full animate-spin" />
-          <span className="text-you42-text-muted text-sm ml-3">Loading seat map...</span>
-        </div>
-      </div>
-    )
-  }
-
   if (loadError) {
     return (
       <div>
         <h3 className="text-lg font-bold text-white">Select Your Seats</h3>
         <div className="border-b border-you42-border mt-2 mb-4" />
-        <p className="text-you42-error text-sm py-6 text-center">Failed to load seat map: {loadError}</p>
+        <p className="text-red-400 text-sm py-6 text-center">Failed to load seat map: {loadError}</p>
+      </div>
+    )
+  }
+
+  if (!seatMapData) {
+    return (
+      <div>
+        <h3 className="text-lg font-bold text-white">Select Your Seats</h3>
+        <div className="border-b border-you42-border mt-2 mb-4" />
+        <div className="flex items-center justify-center py-12 gap-3">
+          <div className="w-5 h-5 border-2 border-you42-blue border-t-transparent rounded-full animate-spin" />
+          <span className="text-slate-400 text-sm">Loading seat map...</span>
+        </div>
       </div>
     )
   }
@@ -179,23 +157,19 @@ function ReservedSeatingSelector({ event }) {
       <div className="border-b border-you42-border mt-2 mb-4" />
 
       <SeatMap
-        svgContent={svgContent}
+        eventId={event.id}
         seatMapData={seatMapData}
-        onSelectionChange={handleSelectionChange}
         selectedSeats={selectedSeats}
+        onSeatClick={handleSeatClick}
       />
 
       {selectedSeats.length > 0 && (
         <div className="mt-4 p-3 bg-you42-surface rounded-lg border border-you42-border">
           <p className="text-white text-sm font-semibold mb-2">Your Selection</p>
-          {selectionSummary.map((group) => (
-            <div key={group.categoryId} className="flex justify-between text-sm mb-1">
-              <span className="text-you42-text-secondary">
-                {group.count}x {group.categoryName}
-              </span>
-              <span className="text-white font-medium">
-                {formatCurrency(group.price * group.count)}
-              </span>
+          {selectionGroups.map((group) => (
+            <div key={group.categoryName} className="flex justify-between text-sm mb-1">
+              <span className="text-slate-400">{group.count}x {group.categoryName}</span>
+              <span className="text-white font-medium">{formatCurrency(group.price * group.count)}</span>
             </div>
           ))}
           <div className="border-t border-you42-border mt-2 pt-2 flex justify-between">
@@ -205,8 +179,8 @@ function ReservedSeatingSelector({ event }) {
         </div>
       )}
 
-      {error && <p className="text-you42-error text-xs mt-3">{error}</p>}
-      {addingSuccess && <p className="text-you42-success text-xs mt-3">Added to cart!</p>}
+      {error && <p className="text-red-400 text-xs mt-3">{error}</p>}
+      {addingSuccess && <p className="text-green-400 text-xs mt-3">Added to cart!</p>}
 
       <button
         onClick={handleAddToCart}

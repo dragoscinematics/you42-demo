@@ -1,304 +1,254 @@
-import { useState, useCallback, useMemo } from 'react'
-import { formatCurrency } from '../../utils/formatCurrency'
+import { useState, useEffect, useRef } from 'react'
+import { getSeatMapSvg } from '../../api/events'
 
-function seatKey(sectionKey, rowLabel, seatNumber) {
-  return `${sectionKey}::${rowLabel}::${seatNumber}`
-}
+export default function SeatMap({ eventId, seatMapData, selectedSeats = [], onSeatClick }) {
+  const containerRef = useRef(null)
+  const [svgContent, setSvgContent] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
 
-function Tooltip({ x, y, text }) {
-  if (!text) return null
-  return (
-    <div
-      className="fixed z-50 px-2.5 py-1.5 rounded text-xs font-medium text-white pointer-events-none whitespace-nowrap"
-      style={{
-        backgroundColor: 'rgba(0,0,0,0.9)',
-        border: '1px solid rgba(255,255,255,0.15)',
-        left: x,
-        top: y - 40,
-        transform: 'translateX(-50%)',
-      }}
-    >
-      {text}
-    </div>
-  )
-}
+  // Load the server SVG (it's the ground truth for visuals)
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    getSeatMapSvg(eventId)
+      .then(svg => { if (!cancelled) { setSvgContent(svg); setLoading(false) } })
+      .catch(err => { if (!cancelled) { setError(err.message); setLoading(false) } })
+    return () => { cancelled = true }
+  }, [eventId])
 
-function GAQuantityPicker({ sectionName, price, available, selectedCount, onSelect, onClose }) {
-  const max = Math.min(available, 20)
-  return (
-    <div
-      className="bg-you42-surface border border-you42-border rounded-lg p-5 text-center min-w-50 shadow-xl"
-      onClick={(e) => e.stopPropagation()}
-    >
-      <p className="text-white text-sm font-bold mb-1">{sectionName || 'General Admission'}</p>
-      <p className="text-you42-text-muted text-xs mb-4">{formatCurrency(price)} each · {available} available</p>
-      <div className="flex items-center justify-center gap-4">
-        <button
-          onClick={() => onSelect(Math.max(0, selectedCount - 1))}
-          disabled={selectedCount <= 0}
-          className="w-9 h-9 rounded-lg bg-you42-surface-hover text-white text-lg flex items-center justify-center hover:bg-you42-border disabled:opacity-20 transition-colors"
-        >−</button>
-        <span className="text-white text-xl font-bold w-8 text-center">{selectedCount}</span>
-        <button
-          onClick={() => onSelect(Math.min(max, selectedCount + 1))}
-          disabled={selectedCount >= max}
-          className="w-9 h-9 rounded-lg bg-you42-surface-hover text-white text-lg flex items-center justify-center hover:bg-you42-border disabled:opacity-20 transition-colors"
-        >+</button>
-      </div>
-      <button onClick={onClose} className="mt-3 text-you42-text-secondary text-xs hover:text-white transition-colors">
-        Done
-      </button>
-    </div>
-  )
-}
+  // Build selected seat set for lookup
+  const selectedIds = new Set(selectedSeats.map(s => s.seatId))
 
-export default function SeatMap({ svgContent, seatMapData, onSelectionChange, selectedSeats = [] }) {
-  const [tooltip, setTooltip] = useState(null)
-  const [hoveredSeat, setHoveredSeat] = useState(null)
-  const [activeGA, setActiveGA] = useState(null)
-  const [gaQuantities, setGaQuantities] = useState({})
+  // Wire up interactivity after SVG mounts
+  useEffect(() => {
+    if (!svgContent || !containerRef.current) return
+    const container = containerRef.current
+    const svgEl = container.querySelector('svg')
+    if (!svgEl) return
 
-  const layout = seatMapData?.layout
-  const sections = seatMapData?.sections || []
-  const categories = seatMapData?.categories || []
-  const layoutSections = layout?.sections || []
+    // Make SVG responsive
+    svgEl.removeAttribute('width')
+    svgEl.removeAttribute('height')
+    svgEl.style.width = '100%'
+    svgEl.style.height = 'auto'
+    svgEl.style.display = 'block'
 
-  const sectionLookup = useMemo(() => {
-    const map = {}
-    for (const s of sections) map[s.sectionKey] = s
-    return map
-  }, [sections])
+    const categories = seatMapData?.categories || []
+    const catMap = Object.fromEntries(categories.map(c => [c.id, c]))
 
-  const categoryLookup = useMemo(() => {
-    const map = {}
-    for (const c of categories) map[c.id] = c
-    return map
-  }, [categories])
+    // Process each section group
+    const sectionGroups = svgEl.querySelectorAll('g[data-section-key]')
+    sectionGroups.forEach(group => {
+      const sectionKey = group.getAttribute('data-section-key')
+      const sectionType = group.getAttribute('data-section-type')
+      const categoryId = group.getAttribute('data-category-id')
+      const available = parseInt(group.getAttribute('data-available') || '0', 10)
+      const cat = catMap[categoryId]
 
-  const selectedSet = useMemo(() => {
-    const set = new Set()
-    for (const s of selectedSeats) set.add(seatKey(s.sectionKey, s.rowLabel, s.seatNumber))
-    return set
-  }, [selectedSeats])
+      // Find the matching section info from seatMapData
+      const sectionInfo = seatMapData?.sections?.find(s => s.sectionKey === sectionKey)
+      const sectionName = sectionInfo?.name || sectionKey
 
-  // Extract viewBox from server SVG
-  const viewBox = useMemo(() => {
-    const match = svgContent?.match(/viewBox="([^"]*)"/)
-    return match ? match[1] : '0 0 1000 800'
-  }, [svgContent])
+      if (sectionType === 'SEATED') {
+        // Individual seat circles — assign stable IDs by position (sorted row by row)
+        const circles = Array.from(group.querySelectorAll('circle'))
+        if (!circles.length) return
 
-  // Convert server SVG to a data URL for use as background
-  const svgDataUrl = useMemo(() => {
-    if (!svgContent) return null
-    // Remove any circles from section groups so we don't get double-rendering
-    // Strip the opacity groups (decorative seat dots) and table-seat circles
-    let cleaned = svgContent
-    // Remove the <g opacity="0.55">...</g> groups (decorative seat preview dots)
-    cleaned = cleaned.replace(/<g opacity="0\.55">[\s\S]*?<\/g>/g, '')
-    // Remove table-seat circles (we'll render our own)
-    cleaned = cleaned.replace(/<circle[^>]*data-table-seat[^>]*\/>/g, '')
-    // Remove table body circles too (the small center ones)
-    // They're the circles inside TABLE sections without data-table-seat
-    // We keep the rect, text, etc.
-    const blob = new Blob([cleaned], { type: 'image/svg+xml' })
-    return URL.createObjectURL(blob)
-  }, [svgContent])
+        // Group by y-coordinate (rows), sort rows top-to-bottom, seats left-to-right
+        const rowMap = {}
+        circles.forEach(c => {
+          const y = parseFloat(c.getAttribute('cy'))
+          const yKey = Math.round(y * 10) / 10
+          if (!rowMap[yKey]) rowMap[yKey] = []
+          rowMap[yKey].push(c)
+        })
+        const sortedYKeys = Object.keys(rowMap).map(Number).sort((a, b) => a - b)
+        // Row labels: A = bottom row (highest y), assign A-Z from bottom up
+        const rowLabels = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')
+        sortedYKeys.forEach((yKey, rowIdx) => {
+          const rowLabel = rowLabels[sortedYKeys.length - 1 - rowIdx] || `R${rowIdx + 1}`
+          const rowCircles = rowMap[yKey].sort((a, b) =>
+            parseFloat(a.getAttribute('cx')) - parseFloat(b.getAttribute('cx'))
+          )
+          rowCircles.forEach((circle, seatIdx) => {
+            const seatNumber = String(seatIdx + 1)
+            const seatId = `${sectionKey}__${rowLabel}__${seatNumber}`
+            const isSelected = selectedIds.has(seatId)
+            const isAvailable = available > 0
 
-  const handleSeatClick = useCallback((sectionKey, rowLabel, seatNumber, meta) => {
-    if (!meta || meta.available <= 0) return
+            circle.setAttribute('data-seat-id', seatId)
+            circle.setAttribute('data-section-key', sectionKey)
+            circle.setAttribute('r', '8') // larger clickable radius
 
-    const category = categoryLookup[meta.categoryId]
-    const key = seatKey(sectionKey, rowLabel, seatNumber)
-    const isTable = meta.sectionType === 'TABLE'
-    const isWholeTable = isTable && meta.bookingMode === 'whole-table'
+            if (isSelected) {
+              circle.setAttribute('fill', '#f59e0b')
+              circle.setAttribute('stroke', '#fbbf24')
+              circle.setAttribute('stroke-width', '2')
+              circle.removeAttribute('opacity')
+            } else if (!isAvailable) {
+              circle.setAttribute('fill', '#4b5563')
+              circle.setAttribute('opacity', '0.4')
+            } else {
+              circle.removeAttribute('stroke')
+              circle.removeAttribute('stroke-width')
+              circle.removeAttribute('opacity')
+            }
 
-    let newSelection
+            circle.style.cursor = isAvailable ? 'pointer' : 'not-allowed'
+            circle.style.transition = 'fill 0.1s, opacity 0.1s'
 
-    if (isWholeTable) {
-      const tableSection = layoutSections.find(s => s.key === sectionKey)
-      if (!tableSection) return
-      const allTableSeats = []
-      for (const row of tableSection.rows || []) {
-        for (const seat of row.seats || []) {
-          allTableSeats.push({
-            sectionKey,
-            rowLabel: row.rowLabel,
-            seatNumber: seat.seatNumber,
-            categoryId: category?.id || meta.categoryId,
-            price: category?.price || 0,
+            if (isAvailable) {
+              circle.onclick = (e) => {
+                e.stopPropagation()
+                onSeatClick?.({
+                  seatId,
+                  seatNumber,
+                  rowLabel,
+                  sectionName,
+                  sectionKey,
+                  categoryId,
+                  categoryName: cat?.name,
+                  price: cat?.price,
+                })
+              }
+              circle.onmouseenter = () => {
+                if (!selectedIds.has(seatId)) {
+                  circle.setAttribute('fill', lightenColor(cat?.color || '#7c3aed'))
+                  circle.setAttribute('stroke', '#fff')
+                  circle.setAttribute('stroke-width', '1.5')
+                }
+              }
+              circle.onmouseleave = () => {
+                if (!selectedIds.has(seatId)) {
+                  circle.setAttribute('fill', cat?.color || '#7c3aed')
+                  circle.removeAttribute('stroke')
+                  circle.removeAttribute('stroke-width')
+                }
+              }
+            }
           })
+        })
+
+      } else if (sectionType === 'TABLE') {
+        // Whole-table click — the center circle or the entire group
+        const isSelected = selectedIds.has(sectionKey)
+        const isAvailable = available > 0
+
+        // Style all circles in the table
+        const circles = Array.from(group.querySelectorAll('circle'))
+        circles.forEach(c => {
+          c.style.cursor = isAvailable ? 'pointer' : 'not-allowed'
+          if (isSelected) {
+            c.setAttribute('opacity', '1')
+            c.setAttribute('stroke', '#fbbf24')
+            c.setAttribute('stroke-width', '2')
+          }
+        })
+
+        if (isAvailable) {
+          group.style.cursor = 'pointer'
+          group.onclick = (e) => {
+            e.stopPropagation()
+            const capacity = parseInt(group.getAttribute('data-capacity') || '1', 10)
+            onSeatClick?.({
+              seatId: sectionKey,
+              seatNumber: '1',
+              rowLabel: '',
+              sectionName,
+              sectionKey,
+              categoryId,
+              categoryName: cat?.name,
+              price: cat?.price,
+              quantity: capacity,
+              isTable: true,
+            })
+          }
+          group.onmouseenter = () => {
+            circles.forEach(c => {
+              if (!isSelected) c.setAttribute('opacity', '1')
+            })
+          }
+          group.onmouseleave = () => {
+            circles.forEach((c, i) => {
+              if (!isSelected) c.setAttribute('opacity', i === 0 ? '0.45' : '0.7')
+            })
+          }
+        }
+
+      } else if (sectionType === 'GA') {
+        // GA section — click the rect
+        const rect = group.querySelector('rect')
+        const isSelected = selectedIds.has(sectionKey)
+        const isAvailable = available > 0
+
+        if (rect && isAvailable) {
+          rect.style.cursor = 'pointer'
+          if (isSelected) {
+            rect.setAttribute('stroke', '#f59e0b')
+            rect.setAttribute('stroke-width', '3')
+            rect.setAttribute('opacity', '0.6')
+          }
+          group.onclick = (e) => {
+            e.stopPropagation()
+            const capacity = parseInt(group.getAttribute('data-capacity') || '1', 10)
+            onSeatClick?.({
+              seatId: sectionKey,
+              seatNumber: '1',
+              rowLabel: '',
+              sectionName,
+              sectionKey,
+              categoryId,
+              categoryName: cat?.name,
+              price: cat?.price,
+              quantity: capacity,
+              isGA: true,
+            })
+          }
+          group.onmouseenter = () => {
+            if (!isSelected) rect.setAttribute('opacity', '0.5')
+          }
+          group.onmouseleave = () => {
+            if (!isSelected) rect.setAttribute('opacity', rect.getAttribute('opacity') || '0.315')
+          }
         }
       }
-      const anySelected = allTableSeats.some(s => selectedSet.has(seatKey(s.sectionKey, s.rowLabel, s.seatNumber)))
-      if (anySelected) {
-        const tableKeys = new Set(allTableSeats.map(s => seatKey(s.sectionKey, s.rowLabel, s.seatNumber)))
-        newSelection = selectedSeats.filter(s => !tableKeys.has(seatKey(s.sectionKey, s.rowLabel, s.seatNumber)))
-      } else {
-        newSelection = [...selectedSeats, ...allTableSeats]
-      }
-    } else {
-      if (selectedSet.has(key)) {
-        newSelection = selectedSeats.filter(s => seatKey(s.sectionKey, s.rowLabel, s.seatNumber) !== key)
-      } else {
-        newSelection = [...selectedSeats, {
-          sectionKey,
-          rowLabel,
-          seatNumber,
-          categoryId: category?.id || meta.categoryId,
-          price: category?.price || 0,
-        }]
-      }
-    }
+    })
 
-    onSelectionChange?.(newSelection)
-  }, [selectedSeats, selectedSet, onSelectionChange, layoutSections, categoryLookup])
+    // Disable pointer events on text and non-interactive elements so they don't block clicks
+    svgEl.querySelectorAll('text, [data-role="background"], [data-role="stage"]').forEach(el => {
+      el.style.pointerEvents = 'none'
+    })
 
-  const handleGAClick = useCallback((sectionKey) => {
-    setActiveGA(prev => prev === sectionKey ? null : sectionKey)
-  }, [])
+  }, [svgContent, selectedSeats, seatMapData, onSeatClick])
 
-  const handleGAQuantityChange = useCallback((sectionKey, quantity) => {
-    const meta = sectionLookup[sectionKey]
-    const category = meta ? categoryLookup[meta.categoryId] : null
-    const layoutSection = layoutSections.find(s => s.key === sectionKey)
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16 gap-3">
+        <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+        <span className="text-slate-400 text-sm">Loading seat map...</span>
+      </div>
+    )
+  }
 
-    setGaQuantities(prev => ({ ...prev, [sectionKey]: quantity }))
-
-    const otherSeats = selectedSeats.filter(s => s.sectionKey !== sectionKey)
-    const gaSeats = []
-    if (quantity > 0 && layoutSection) {
-      const row = layoutSection.rows?.[0]
-      const rowLabel = row?.rowLabel || 'GA'
-      for (let i = 0; i < quantity; i++) {
-        const seat = row?.seats?.[i]
-        gaSeats.push({
-          sectionKey,
-          rowLabel,
-          seatNumber: seat?.seatNumber || String(i + 1),
-          categoryId: category?.id || meta?.categoryId,
-          price: category?.price || 0,
-        })
-      }
-    }
-    onSelectionChange?.([...otherSeats, ...gaSeats])
-  }, [selectedSeats, sectionLookup, categoryLookup, layoutSections, onSelectionChange])
-
-  if (!svgContent || !layout) return null
+  if (error) {
+    return <p className="text-red-400 text-sm py-6 text-center">Failed to load seat map: {error}</p>
+  }
 
   return (
-    <div className="relative w-full">
-      <div className="w-full overflow-auto rounded-lg border border-you42-surface-hover" style={{ WebkitOverflowScrolling: 'touch' }}>
-        <div className="relative" style={{ lineHeight: 0 }}>
-          {/* Server SVG as background image — provides stage, shapes, labels, legend */}
-          {svgDataUrl && (
-            <img
-              src={svgDataUrl}
-              alt=""
-              className="w-full h-auto max-h-[65vh]"
-              style={{ display: 'block' }}
-              draggable={false}
-            />
-          )}
-
-          {/* React-rendered interactive SVG overlay — exact same viewBox */}
-          <svg
-            viewBox={viewBox}
-            className="absolute inset-0 w-full h-full"
-            preserveAspectRatio="xMidYMid meet"
-          >
-            {/* Render clickable seats for each section */}
-            {layoutSections.map((section) => {
-              const meta = sectionLookup[section.key]
-              const sectionType = section.sectionType || meta?.sectionType || 'SEATED'
-              const category = meta ? categoryLookup[meta.categoryId] : null
-              const color = category?.color || '#666'
-              const price = category?.price || 0
-              const isUnavailable = meta && meta.available <= 0
-              const sectionName = section.name || meta?.name || category?.name || 'Section'
-
-              if (sectionType === 'GA') {
-                // GA: render a transparent clickable rect
-                return (
-                  <rect
-                    key={section.key}
-                    x={section.x}
-                    y={section.y}
-                    width={section.width || 500}
-                    height={section.height || 120}
-                    fill="transparent"
-                    style={{ cursor: 'pointer' }}
-                    onClick={() => handleGAClick(section.key)}
-                  />
-                )
-              }
-
-              const isTable = sectionType === 'TABLE'
-              const seatRadius = isTable ? 5.5 : 4
-
-              return (
-                <g key={section.key}>
-                  {(section.rows || []).map((row) =>
-                    (row.seats || []).map((seat) => {
-                      const key = seatKey(section.key, row.rowLabel, seat.seatNumber)
-                      const isSelected = selectedSet.has(key)
-                      const isHovered = hoveredSeat === key
-
-                      return (
-                        <circle
-                          key={key}
-                          cx={seat.x}
-                          cy={seat.y}
-                          r={isSelected ? seatRadius * 1.5 : isHovered ? seatRadius * 1.4 : seatRadius}
-                          fill={isUnavailable ? '#2a2a2a' : isSelected ? '#ffffff' : isHovered ? '#ffffff' : color}
-                          fillOpacity={isSelected ? 1 : isUnavailable ? 0.2 : isHovered ? 0.9 : 0.7}
-                          stroke={isSelected ? color : 'none'}
-                          strokeWidth={isSelected ? 2 : 0}
-                          style={{
-                            cursor: isUnavailable ? 'not-allowed' : 'pointer',
-                            transition: 'all 0.12s ease',
-                          }}
-                          onClick={() => !isUnavailable && handleSeatClick(section.key, row.rowLabel, seat.seatNumber, meta)}
-                          onMouseEnter={(e) => {
-                            if (!isUnavailable) setHoveredSeat(key)
-                            setTooltip({
-                              x: e.clientX,
-                              y: e.clientY,
-                              text: `${sectionName} · Row ${row.rowLabel}, Seat ${seat.seatNumber} – ${formatCurrency(price)}`,
-                            })
-                          }}
-                          onMouseLeave={() => {
-                            setHoveredSeat(null)
-                            setTooltip(null)
-                          }}
-                        />
-                      )
-                    })
-                  )}
-                </g>
-              )
-            })}
-          </svg>
-        </div>
-
-        {/* GA quantity picker overlay */}
-        {activeGA && (
-          <div
-            className="absolute inset-0 bg-black/50 flex items-center justify-center z-10 backdrop-blur-sm"
-            onClick={() => setActiveGA(null)}
-          >
-            <GAQuantityPicker
-              sectionName={sectionLookup[activeGA]?.name || 'General Admission'}
-              price={categoryLookup[sectionLookup[activeGA]?.categoryId]?.price || 0}
-              available={sectionLookup[activeGA]?.available || 0}
-              selectedCount={gaQuantities[activeGA] || 0}
-              onSelect={(qty) => handleGAQuantityChange(activeGA, qty)}
-              onClose={() => setActiveGA(null)}
-            />
-          </div>
-        )}
-      </div>
-
-      {tooltip && <Tooltip x={tooltip.x} y={tooltip.y} text={tooltip.text} />}
-    </div>
+    <div
+      ref={containerRef}
+      className="w-full rounded-lg overflow-hidden"
+      dangerouslySetInnerHTML={{ __html: svgContent }}
+    />
   )
+}
+
+function lightenColor(hex) {
+  if (!hex || !hex.startsWith('#')) return hex
+  const n = parseInt(hex.slice(1), 16)
+  const r = Math.min(255, ((n >> 16) & 0xff) + 40)
+  const g = Math.min(255, ((n >> 8) & 0xff) + 40)
+  const b = Math.min(255, (n & 0xff) + 40)
+  return `#${r.toString(16).padStart(2,'0')}${g.toString(16).padStart(2,'0')}${b.toString(16).padStart(2,'0')}`
 }
