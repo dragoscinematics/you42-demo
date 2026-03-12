@@ -45,14 +45,14 @@ export default function EventPage() {
     )
   }
 
-  const isReservedSeating = event.eventType === 'RESERVED_SEATING'
+  const needsFullWidth = event.eventType === 'RESERVED_SEATING' || event.eventType === 'TIMED_ENTRY'
 
   return (
     <div>
       <EventHero event={event} />
 
       <div className="max-w-300 mx-auto px-4 sm:px-6 py-8">
-        {isReservedSeating ? (
+        {needsFullWidth ? (
           <div className="space-y-10">
             <TicketSelector event={event} />
             <EventInfo event={event} />
