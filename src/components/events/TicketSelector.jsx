@@ -1,7 +1,6 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useCart } from '../../context/CartContext'
 import { formatCurrency } from '../../utils/formatCurrency'
-import { getSeatMap } from '../../api/events'
 import SeatMap from './SeatMap'
 
 // Fuzzy match category name to ticket type name
@@ -53,9 +52,7 @@ function matchCategoryToTicketType(categoryName, ticketTypes) {
 
 function ReservedSeatingSelector({ event }) {
   const { addItem, isLoading, setTicketTypePrices } = useCart()
-  const [seatMapData, setSeatMapData] = useState(null)
-  const [loadError, setLoadError] = useState(null)
-  const [selectedSeats, setSelectedSeats] = useState([])
+  const [selection, setSelection] = useState(null) // from PT_SEAT_SELECTION_CHANGED
   const [error, setError] = useState(null)
   const [addingSuccess, setAddingSuccess] = useState(false)
 
@@ -70,38 +67,34 @@ function ReservedSeatingSelector({ event }) {
     setTicketTypePrices(priceMap)
   }, [ticketTypes, setTicketTypePrices])
 
-  useEffect(() => {
-    let cancelled = false
-    getSeatMap(event.id)
-      .then(data => { if (!cancelled) setSeatMapData(data) })
-      .catch(err => { if (!cancelled) setLoadError(err.message) })
-    return () => { cancelled = true }
-  }, [event.id])
+  const handleReady = useCallback((payload) => {
+    // Embed is loaded — payload has categories, sections, totalSeats, etc.
+  }, [])
 
-  const handleSeatClick = (seat) => {
-    setSelectedSeats(prev => {
-      const exists = prev.find(s => s.seatId === seat.seatId)
-      return exists ? prev.filter(s => s.seatId !== seat.seatId) : [...prev, seat]
-    })
-  }
+  const handleSelectionChange = useCallback((payload) => {
+    setSelection(payload)
+  }, [])
 
-  // Group selected seats by category for summary + cart
+  const selectedSeats = selection?.seats || []
+  const summary = selection?.summary || { count: 0, subtotal: 0, allInTotal: 0 }
+
+  // Group selected seats by category for cart
   const selectionGroups = useMemo(() => {
     const groups = {}
     for (const seat of selectedSeats) {
-      const key = seat.categoryId || seat.categoryName || 'ticket'
-      if (!groups[key]) {
-        groups[key] = { categoryName: seat.categoryName, price: seat.price || 0, count: 0 }
+      const catName = seat.categoryName || 'Ticket'
+      if (!groups[catName]) {
+        groups[catName] = {
+          categoryName: catName,
+          price: seat.price || 0,
+          allInPrice: seat.allInPrice || seat.price || 0,
+          count: 0,
+        }
       }
-      groups[key].count++
+      groups[catName].count++
     }
     return Object.values(groups)
   }, [selectedSeats])
-
-  const totalPrice = useMemo(
-    () => selectedSeats.reduce((sum, s) => sum + (s.price || 0), 0),
-    [selectedSeats]
-  )
 
   const handleAddToCart = async () => {
     setError(null)
@@ -120,35 +113,12 @@ function ReservedSeatingSelector({ event }) {
           quantity: group.count,
         })
       }
-      setSelectedSeats([])
+      setSelection(null)
       setAddingSuccess(true)
       setTimeout(() => setAddingSuccess(false), 3000)
     } catch (err) {
       setError(err.message)
     }
-  }
-
-  if (loadError) {
-    return (
-      <div>
-        <h3 className="text-lg font-bold text-white">Select Your Seats</h3>
-        <div className="border-b border-you42-border mt-2 mb-4" />
-        <p className="text-red-400 text-sm py-6 text-center">Failed to load seat map: {loadError}</p>
-      </div>
-    )
-  }
-
-  if (!seatMapData) {
-    return (
-      <div>
-        <h3 className="text-lg font-bold text-white">Select Your Seats</h3>
-        <div className="border-b border-you42-border mt-2 mb-4" />
-        <div className="flex items-center justify-center py-12 gap-3">
-          <div className="w-5 h-5 border-2 border-you42-blue border-t-transparent rounded-full animate-spin" />
-          <span className="text-slate-400 text-sm">Loading seat map...</span>
-        </div>
-      </div>
-    )
   }
 
   return (
@@ -158,9 +128,8 @@ function ReservedSeatingSelector({ event }) {
 
       <SeatMap
         eventId={event.id}
-        seatMapData={seatMapData}
-        selectedSeats={selectedSeats}
-        onSeatClick={handleSeatClick}
+        onSelectionChange={handleSelectionChange}
+        onReady={handleReady}
       />
 
       {selectedSeats.length > 0 && (
@@ -169,12 +138,16 @@ function ReservedSeatingSelector({ event }) {
           {selectionGroups.map((group) => (
             <div key={group.categoryName} className="flex justify-between text-sm mb-1">
               <span className="text-slate-400">{group.count}x {group.categoryName}</span>
-              <span className="text-white font-medium">{formatCurrency(group.price * group.count)}</span>
+              <span className="text-white font-medium">
+                {formatCurrency(group.allInPrice * group.count)}
+              </span>
             </div>
           ))}
           <div className="border-t border-you42-border mt-2 pt-2 flex justify-between">
             <span className="text-white text-sm font-semibold">Total</span>
-            <span className="text-white text-sm font-bold">{formatCurrency(totalPrice)}</span>
+            <span className="text-white text-sm font-bold">
+              {formatCurrency(summary.allInTotal || summary.subtotal)}
+            </span>
           </div>
         </div>
       )}
