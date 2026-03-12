@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useCart } from '../../context/CartContext'
 import { formatCurrency } from '../../utils/formatCurrency'
 import { getAvailableDates, getAvailableSlots } from '../../api/events'
-import { format, parseISO, addMonths } from 'date-fns'
+import { format, parseISO, addMonths, startOfMonth, endOfMonth, startOfWeek, endOfWeek, addDays, isSameMonth, isSameDay, subMonths } from 'date-fns'
 import SeatMap from './SeatMap'
 
 // Fuzzy match category name to ticket type name
@@ -310,6 +310,67 @@ function formatSlotTime(time) {
   return m === 0 ? `${hour} ${ampm}` : `${hour}:${String(m).padStart(2, '0')} ${ampm}`
 }
 
+function MiniCalendar({ availableDates, selectedDate, onSelect }) {
+  const availableSet = useMemo(() => new Set(availableDates), [availableDates])
+  const initialMonth = selectedDate ? parseISO(selectedDate) : new Date()
+  const [currentMonth, setCurrentMonth] = useState(startOfMonth(initialMonth))
+
+  const weeks = useMemo(() => {
+    const start = startOfWeek(startOfMonth(currentMonth))
+    const end = endOfWeek(endOfMonth(currentMonth))
+    const rows = []
+    let day = start
+    while (day <= end) {
+      const week = []
+      for (let i = 0; i < 7; i++) {
+        week.push(day)
+        day = addDays(day, 1)
+      }
+      rows.push(week)
+    }
+    return rows
+  }, [currentMonth])
+
+  return (
+    <div className="bg-you42-surface rounded-lg border border-you42-border p-3 max-w-xs">
+      <div className="flex items-center justify-between mb-2">
+        <button onClick={() => setCurrentMonth(subMonths(currentMonth, 1))} className="text-slate-400 hover:text-white p-1 text-sm">&larr;</button>
+        <span className="text-white text-sm font-semibold">{format(currentMonth, 'MMMM yyyy')}</span>
+        <button onClick={() => setCurrentMonth(addMonths(currentMonth, 1))} className="text-slate-400 hover:text-white p-1 text-sm">&rarr;</button>
+      </div>
+      <div className="grid grid-cols-7 gap-0.5 text-center">
+        {['Su','Mo','Tu','We','Th','Fr','Sa'].map(d => (
+          <div key={d} className="text-slate-500 text-[10px] font-medium py-1">{d}</div>
+        ))}
+        {weeks.flat().map((day, i) => {
+          const dateStr = format(day, 'yyyy-MM-dd')
+          const inMonth = isSameMonth(day, currentMonth)
+          const isAvailable = availableSet.has(dateStr)
+          const isSelected = selectedDate === dateStr
+          const isPast = day < new Date(new Date().toDateString())
+
+          return (
+            <button
+              key={i}
+              onClick={() => isAvailable && onSelect(dateStr)}
+              disabled={!isAvailable || !inMonth}
+              className={`w-8 h-8 rounded-full text-xs font-medium transition-colors ${
+                !inMonth ? 'text-transparent cursor-default' :
+                isSelected ? 'bg-you42-blue text-white' :
+                isAvailable ? 'text-white hover:bg-you42-blue/30 cursor-pointer' :
+                isPast ? 'text-slate-700 cursor-default' :
+                'text-slate-600 cursor-default'
+              }`}
+            >
+              {format(day, 'd')}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function TimedEntrySelector({ event }) {
   const { addItem, isLoading, setTicketTypePrices } = useCart()
   const [dates, setDates] = useState([])
@@ -433,27 +494,11 @@ function TimedEntrySelector({ event }) {
         ) : dates.length === 0 ? (
           <p className="text-slate-400 text-sm py-3">No dates available</p>
         ) : (
-          <div className="flex gap-2 overflow-x-auto pb-2 -mx-1 px-1">
-            {dates.slice(0, 14).map(date => {
-              const d = parseISO(date)
-              const isSelected = date === selectedDate
-              return (
-                <button
-                  key={date}
-                  onClick={() => setSelectedDate(date)}
-                  className={`flex-shrink-0 flex flex-col items-center px-3 py-2 rounded-lg border text-xs transition-colors ${
-                    isSelected
-                      ? 'bg-you42-blue border-you42-blue text-white'
-                      : 'bg-you42-surface border-you42-border text-slate-300 hover:border-you42-blue/50'
-                  }`}
-                >
-                  <span className="font-medium">{format(d, 'EEE')}</span>
-                  <span className="text-lg font-bold leading-tight">{format(d, 'd')}</span>
-                  <span>{format(d, 'MMM')}</span>
-                </button>
-              )
-            })}
-          </div>
+          <MiniCalendar
+            availableDates={dates}
+            selectedDate={selectedDate}
+            onSelect={setSelectedDate}
+          />
         )}
       </div>
 
