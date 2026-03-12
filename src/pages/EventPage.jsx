@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams } from 'react-router-dom'
-import { getEvents } from '../api/events'
+import { getEventBySlug } from '../api/events'
 import EventHero from '../components/events/EventHero'
 import EventInfo from '../components/events/EventInfo'
 import TicketSelector from '../components/events/TicketSelector'
@@ -13,22 +13,17 @@ export default function EventPage() {
   const [error, setError] = useState(null)
 
   useEffect(() => {
-    async function fetchEvent() {
-      try {
-        const events = await getEvents()
-        const found = events.find(e => e.slug === slug)
-        if (found) {
-          setEvent(found)
-        } else {
-          setError('Event not found')
-        }
-      } catch (err) {
-        setError(err.message)
-      } finally {
-        setLoading(false)
-      }
-    }
-    fetchEvent()
+    let cancelled = false
+    setLoading(true)
+    setEvent(null)
+    setError(null)
+
+    getEventBySlug(slug)
+      .then(found => { if (!cancelled) setEvent(found) })
+      .catch(err => { if (!cancelled) setError(err.message) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+
+    return () => { cancelled = true }
   }, [slug])
 
   if (loading) {
@@ -58,13 +53,11 @@ export default function EventPage() {
 
       <div className="max-w-300 mx-auto px-4 sm:px-6 py-8">
         {isReservedSeating ? (
-          // Reserved seating: seat map needs full width, details below
           <div className="space-y-10">
             <TicketSelector event={event} />
             <EventInfo event={event} />
           </div>
         ) : (
-          // Standard: side-by-side layout
           <div className="grid grid-cols-1 lg:grid-cols-5 gap-10">
             <div className="lg:col-span-3">
               <EventInfo event={event} />

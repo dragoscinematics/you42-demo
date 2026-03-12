@@ -26,8 +26,9 @@ const SeatMap = forwardRef(function SeatMap({ eventId, onSelectionChange, onRead
     return () => window.removeEventListener('message', handleMessage)
   }, [onSelectionChange, onReady])
 
+  // Fallback: if PT_SEAT_MAP_READY never fires, hide spinner after iframe loads
   const handleIframeLoad = useCallback(() => {
-    setTimeout(() => setLoading(false), 4000)
+    setTimeout(() => setLoading(false), 1500)
   }, [])
 
   const sendCommand = useCallback((type, payload = {}) => {

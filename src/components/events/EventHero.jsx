@@ -1,8 +1,8 @@
 import { formatEventDateRange } from '../../utils/formatDate'
 
 export default function EventHero({ event }) {
-  const hasImage = !!event.imageUrl
   const bannerImage = event.bannerUrl || event.imageUrl
+  const hasImage = !!bannerImage && !bannerImage.startsWith('data:')
 
   return (
     <div className="relative w-full h-72 sm:h-96 overflow-hidden">
@@ -11,6 +11,8 @@ export default function EventHero({ event }) {
           src={bannerImage}
           alt={event.name}
           className="absolute inset-0 w-full h-full object-cover"
+          loading="eager"
+          fetchPriority="high"
         />
       ) : (
         <div className="absolute inset-0 bg-gradient-to-br from-[#2a1a4e] via-[#1a3a5e] to-[#0a2a3e]" />

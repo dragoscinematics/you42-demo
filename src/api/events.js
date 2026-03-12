@@ -11,6 +11,13 @@ export async function getEvent(id) {
   return data.event
 }
 
+export async function getEventBySlug(slug) {
+  const data = await api.get('/events/public', { includeTickets: 'true' })
+  const found = data.events?.find(e => e.slug === slug)
+  if (!found) throw new Error('Event not found')
+  return found
+}
+
 export async function getAvailableDates(eventId, from, to) {
   const params = {}
   if (from) params.from = from
