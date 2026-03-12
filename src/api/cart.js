@@ -24,8 +24,10 @@ export async function updateCartItem(itemId, quantity) {
 
 export async function removeCartItem(itemId) {
   const sessionId = getSessionId()
-  const data = await api.delete(`/cart/items/${itemId}`, { sessionId })
-  return data.data || data.cart
+  await api.delete(`/cart/items/${itemId}`, { sessionId })
+  // API returns stale data with the item still present, so fetch fresh cart
+  const fresh = await api.get('/cart', { sessionId })
+  return fresh.data || fresh.cart
 }
 
 export async function clearCart() {
