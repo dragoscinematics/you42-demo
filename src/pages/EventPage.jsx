@@ -47,9 +47,11 @@ export default function EventPage() {
 
   const needsFullWidth = event.eventType === 'RESERVED_SEATING' || event.eventType === 'TIMED_ENTRY'
 
+  const isTimedEntry = event.eventType === 'TIMED_ENTRY'
+
   return (
     <div>
-      <EventHero event={event} />
+      {!isTimedEntry && <EventHero event={event} />}
 
       <div className="max-w-300 mx-auto px-4 sm:px-6 py-8">
         {needsFullWidth ? (

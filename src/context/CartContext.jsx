@@ -5,6 +5,30 @@ import { api } from '../api/client'
 const CartContext = createContext()
 
 const CART_TIMEOUT_MINUTES = 15 // default, overridden by API
+const EXPIRES_AT_KEY = 'pt_cart_expires_at'
+
+function getSavedExpiresAt() {
+  try {
+    const saved = localStorage.getItem(EXPIRES_AT_KEY)
+    if (!saved) return null
+    // If already expired, clear it
+    if (new Date(saved) <= new Date()) {
+      localStorage.removeItem(EXPIRES_AT_KEY)
+      return null
+    }
+    return saved
+  } catch { return null }
+}
+
+function saveExpiresAt(expiresAt) {
+  try {
+    if (expiresAt) {
+      localStorage.setItem(EXPIRES_AT_KEY, expiresAt)
+    } else {
+      localStorage.removeItem(EXPIRES_AT_KEY)
+    }
+  } catch {}
+}
 
 const initialState = {
   items: [],
@@ -15,7 +39,7 @@ const initialState = {
   total: 0,
   promoCode: null,
   cartId: null,
-  expiresAt: null, // ISO timestamp when cart expires
+  expiresAt: getSavedExpiresAt(), // restore from localStorage
   isOpen: false,
   isLoading: false,
   error: null,
@@ -30,23 +54,40 @@ function cartReducer(state, action) {
       return { ...state, error: action.payload, isLoading: false }
     case 'SET_CART': {
       const cart = action.payload
-      if (!cart) return { ...state, ...initialState, isOpen: state.isOpen }
+      if (!cart) {
+        saveExpiresAt(null)
+        return { ...state, ...initialState, isOpen: state.isOpen }
+      }
       const items = (cart.items || []).map(item => ({
         ...item,
         priceAtTime: Number(item.priceAtTime) || 0,
       }))
       const subtotal = items.reduce((sum, item) => sum + (item.priceAtTime * item.quantity), 0)
-      // Calculate expiration: use API's expiresAt, or compute from createdAt/updatedAt
+
       let expiresAt = state.expiresAt
       if (cart.expiresAt) {
+        // API provides expiration — use it
         expiresAt = cart.expiresAt
-      } else if (items.length > 0 && !state.expiresAt) {
-        // First time we see items — set expiration from now
+      } else if (action.isNewAdd && items.length > 0) {
+        // Only reset timer on explicit add-to-cart, not on refresh
         const timeout = action.timeoutMinutes || CART_TIMEOUT_MINUTES
         expiresAt = new Date(Date.now() + timeout * 60 * 1000).toISOString()
       } else if (items.length === 0) {
         expiresAt = null
       }
+      // If we loaded a cart from API but have no saved expiration, calculate from updatedAt
+      if (items.length > 0 && !expiresAt && cart.updatedAt) {
+        const timeout = action.timeoutMinutes || CART_TIMEOUT_MINUTES
+        const expiry = new Date(new Date(cart.updatedAt).getTime() + timeout * 60 * 1000)
+        if (expiry <= new Date()) {
+          // Already expired — clear it
+          saveExpiresAt(null)
+          return { ...state, ...initialState, isOpen: state.isOpen, error: 'Your cart has expired. Please add items again.' }
+        }
+        expiresAt = expiry.toISOString()
+      }
+
+      saveExpiresAt(expiresAt)
       return {
         ...state,
         items,
@@ -81,8 +122,10 @@ function cartReducer(state, action) {
     case 'SET_EXPIRES_AT':
       return { ...state, expiresAt: action.payload }
     case 'CART_EXPIRED':
+      saveExpiresAt(null)
       return { ...initialState, isOpen: state.isOpen, error: 'Your cart has expired. Please add items again.' }
     case 'CLEAR':
+      saveExpiresAt(null)
       return { ...initialState }
     default:
       return state
@@ -136,7 +179,7 @@ export function CartProvider({ children }) {
     dispatch({ type: 'SET_LOADING', payload: true })
     try {
       const cart = await cartApi.addToCart({ eventId, ticketTypeId, quantity, timeSlotId, timeSlotDate })
-      dispatch({ type: 'SET_CART', payload: cart, timeoutMinutes: cartTimeoutRef.current })
+      dispatch({ type: 'SET_CART', payload: cart, timeoutMinutes: cartTimeoutRef.current, isNewAdd: true })
       skipNextRefresh.current = true
       dispatch({ type: 'OPEN_DRAWER' })
     } catch (err) {
