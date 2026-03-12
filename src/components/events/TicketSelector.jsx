@@ -371,19 +371,65 @@ function MiniCalendar({ availableDates, selectedDate, onSelect }) {
   )
 }
 
+// Classify ticket types into rooms, passes, and hour add-ons
+function classifyTicketTypes(ticketTypes) {
+  const hourAddonPattern = /^\+\d+\s*(extra\s+)?hours?$/i
+  const passPattern = /pass$/i
+  const rooms = []
+  const passes = []
+  const addons = []
+
+  for (const tt of ticketTypes) {
+    if (tt.isVisible === false) continue
+    if (hourAddonPattern.test(tt.name)) {
+      addons.push(tt)
+    } else if (passPattern.test(tt.name)) {
+      passes.push(tt)
+    } else {
+      rooms.push(tt)
+    }
+  }
+
+  rooms.sort((a, b) => a.name.localeCompare(b.name))
+  passes.sort((a, b) => (a.price || 0) - (b.price || 0))
+  return { rooms, passes, addons }
+}
+
+// Check how many consecutive slots are available for a given room starting at a slot index
+function getMaxConsecutiveHours(slots, startIndex, roomTicketTypeId) {
+  let count = 0
+  for (let i = startIndex; i < slots.length; i++) {
+    const avail = slots[i].availabilityByTicketType?.[roomTicketTypeId]
+    if (!avail || avail.remaining <= 0) break
+    // Check slots are actually consecutive (no gaps)
+    if (i > startIndex) {
+      const prevEnd = slots[i - 1].endTime
+      const currStart = slots[i].startTime
+      if (prevEnd !== currStart) break
+    }
+    count++
+  }
+  return count
+}
+
 function TimedEntrySelector({ event }) {
   const { addItem, isLoading, setTicketTypePrices } = useCart()
   const [dates, setDates] = useState([])
   const [selectedDate, setSelectedDate] = useState(null)
   const [slots, setSlots] = useState([])
-  const [selectedSlot, setSelectedSlot] = useState(null)
-  const [quantities, setQuantities] = useState({})
+  const [selectedRoom, setSelectedRoom] = useState(null)
+  const [selectedDuration, setSelectedDuration] = useState(1)
+  const [selectedStartSlotIndex, setSelectedStartSlotIndex] = useState(null)
   const [loadingDates, setLoadingDates] = useState(true)
   const [loadingSlots, setLoadingSlots] = useState(false)
   const [error, setError] = useState(null)
   const [addingSuccess, setAddingSuccess] = useState(false)
+  const [showMap, setShowMap] = useState(false)
+  // Flow: 1=room, 2=date, 3=time+duration
+  const [step, setStep] = useState(1)
 
   const ticketTypes = event.ticketTypes || []
+  const { rooms, passes } = useMemo(() => classifyTicketTypes(ticketTypes), [ticketTypes])
 
   useEffect(() => {
     if (ticketTypes.length === 0) return
@@ -394,19 +440,14 @@ function TimedEntrySelector({ event }) {
     setTicketTypePrices(priceMap)
   }, [ticketTypes, setTicketTypePrices])
 
-  // Load available dates
+  // Preload available dates on mount
   useEffect(() => {
     let cancelled = false
     setLoadingDates(true)
     const today = new Date().toISOString().split('T')[0]
     const end = addMonths(new Date(), 2).toISOString().split('T')[0]
     getAvailableDates(event.id, today, end)
-      .then(d => {
-        if (!cancelled) {
-          setDates(d || [])
-          if (d?.length > 0) setSelectedDate(d[0])
-        }
-      })
+      .then(d => { if (!cancelled) setDates(d || []) })
       .catch(() => { if (!cancelled) setDates([]) })
       .finally(() => { if (!cancelled) setLoadingDates(false) })
     return () => { cancelled = true }
@@ -414,16 +455,15 @@ function TimedEntrySelector({ event }) {
 
   // Load time slots when date changes
   useEffect(() => {
-    if (!selectedDate) { setSlots([]); setSelectedSlot(null); return }
+    if (!selectedDate) { setSlots([]); return }
     let cancelled = false
     setLoadingSlots(true)
-    setSelectedSlot(null)
-    setQuantities({})
+    setSelectedStartSlotIndex(null)
     getAvailableSlots(event.id, selectedDate)
       .then(s => {
         if (!cancelled) {
-          setSlots(s || [])
-          if (s?.length > 0) setSelectedSlot(s[0])
+          const sorted = (s || []).sort((a, b) => a.startTime.localeCompare(b.startTime))
+          setSlots(sorted)
         }
       })
       .catch(() => { if (!cancelled) setSlots([]) })
@@ -431,46 +471,119 @@ function TimedEntrySelector({ event }) {
     return () => { cancelled = true }
   }, [event.id, selectedDate])
 
-  // Filter ticket types by slot availability
-  const availableTicketTypes = useMemo(() => {
-    if (!selectedSlot) return []
-    const byTT = selectedSlot.availabilityByTicketType || {}
-    return ticketTypes
-      .filter(tt => tt.isVisible !== false)
-      .filter(tt => {
-        const avail = byTT[tt.id]
-        return avail && avail.remaining > 0
-      })
-      .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0))
-  }, [ticketTypes, selectedSlot])
+  // For the selected room, figure out which start times work
+  const startTimeOptions = useMemo(() => {
+    if (!selectedRoom || slots.length === 0) return []
+    return slots.map((slot, index) => {
+      const maxHours = getMaxConsecutiveHours(slots, index, selectedRoom.id)
+      return { slot, index, maxHours }
+    }).filter(opt => opt.maxHours > 0)
+  }, [selectedRoom, slots])
 
-  const updateQuantity = (ticketTypeId, delta, max = 10) => {
-    setQuantities(prev => {
-      const current = prev[ticketTypeId] || 0
-      const next = Math.max(0, Math.min(max, current + delta))
-      return { ...prev, [ticketTypeId]: next }
-    })
+  const maxDurationForStart = useMemo(() => {
+    if (selectedStartSlotIndex === null) return 0
+    const opt = startTimeOptions.find(o => o.index === selectedStartSlotIndex)
+    return Math.min(opt?.maxHours || 0, 5)
+  }, [selectedStartSlotIndex, startTimeOptions])
+
+  useEffect(() => {
+    if (selectedDuration > maxDurationForStart && maxDurationForStart > 0) {
+      setSelectedDuration(maxDurationForStart)
+    }
+  }, [maxDurationForStart, selectedDuration])
+
+  const roomPrice = selectedRoom?.allInPrice || selectedRoom?.price || 0
+  const totalPrice = roomPrice * selectedDuration
+
+  const bookingSummary = useMemo(() => {
+    if (selectedStartSlotIndex === null || !selectedRoom || selectedDuration === 0) return null
+    const startSlot = slots[selectedStartSlotIndex]
+    const endSlot = slots[selectedStartSlotIndex + selectedDuration - 1]
+    if (!startSlot || !endSlot) return null
+    return {
+      room: selectedRoom.name,
+      date: selectedDate,
+      startTime: startSlot.startTime,
+      endTime: endSlot.endTime,
+      duration: selectedDuration,
+      pricePerHour: roomPrice,
+      total: totalPrice,
+      slotIds: slots.slice(selectedStartSlotIndex, selectedStartSlotIndex + selectedDuration).map(s => s.id),
+    }
+  }, [selectedStartSlotIndex, selectedRoom, selectedDuration, slots, selectedDate, roomPrice, totalPrice])
+
+  const handleSelectRoom = (room) => {
+    setSelectedRoom(room)
+    setSelectedDate(null)
+    setSelectedDuration(1)
+    setSelectedStartSlotIndex(null)
+    setSlots([])
+    setStep(2)
   }
 
-  const totalSelected = Object.values(quantities).reduce((sum, qty) => sum + qty, 0)
+  const handleSelectDate = (date) => {
+    setSelectedDate(date)
+    setSelectedDuration(1)
+    setSelectedStartSlotIndex(null)
+    setStep(3)
+  }
+
+  const handleSelectStartTime = (index) => {
+    setSelectedStartSlotIndex(index)
+    const opt = startTimeOptions.find(o => o.index === index)
+    const max = Math.min(opt?.maxHours || 1, 5)
+    if (selectedDuration > max) setSelectedDuration(max)
+    if (selectedDuration === 0) setSelectedDuration(1)
+  }
 
   const handleAddToCart = async () => {
     setError(null)
     setAddingSuccess(false)
-    if (!selectedSlot || totalSelected === 0) return
+    if (!bookingSummary) return
 
     try {
-      const selected = Object.entries(quantities).filter(([, qty]) => qty > 0)
-      for (const [ticketTypeId, quantity] of selected) {
+      for (const slotId of bookingSummary.slotIds) {
         await addItem({
           eventId: event.id,
-          ticketTypeId,
-          quantity,
-          timeSlotId: selectedSlot.id,
+          ticketTypeId: selectedRoom.id,
+          quantity: 1,
+          timeSlotId: slotId,
           timeSlotDate: selectedDate,
         })
       }
-      setQuantities({})
+      setAddingSuccess(true)
+      // Reset to room selection for another booking
+      setSelectedDate(null)
+      setSelectedDuration(1)
+      setSelectedStartSlotIndex(null)
+      setSlots([])
+      setStep(1)
+      setSelectedRoom(null)
+      setTimeout(() => setAddingSuccess(false), 3000)
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  // Pass purchase
+  const [passQuantities, setPassQuantities] = useState({})
+  const updatePassQty = (id, delta, max = 4) => {
+    setPassQuantities(prev => {
+      const cur = prev[id] || 0
+      return { ...prev, [id]: Math.max(0, Math.min(max, cur + delta)) }
+    })
+  }
+  const totalPassesSelected = Object.values(passQuantities).reduce((s, q) => s + q, 0)
+
+  const handleAddPasses = async () => {
+    setError(null)
+    const selected = Object.entries(passQuantities).filter(([, qty]) => qty > 0)
+    if (selected.length === 0) return
+    try {
+      for (const [ticketTypeId, quantity] of selected) {
+        await addItem({ eventId: event.id, ticketTypeId, quantity })
+      }
+      setPassQuantities({})
       setAddingSuccess(true)
       setTimeout(() => setAddingSuccess(false), 3000)
     } catch (err) {
@@ -479,135 +592,269 @@ function TimedEntrySelector({ event }) {
   }
 
   return (
-    <div>
-      <h3 className="text-lg font-bold text-white">Book Your Time</h3>
-      <div className="border-b border-you42-border mt-2 mb-4" />
-
-      {/* Date picker */}
-      <div className="mb-4">
-        <label className="text-white text-sm font-medium block mb-2">Select a Date</label>
-        {loadingDates ? (
-          <div className="flex items-center gap-2 py-3">
-            <div className="w-4 h-4 border-2 border-you42-blue border-t-transparent rounded-full animate-spin" />
-            <span className="text-slate-400 text-sm">Loading dates...</span>
+    <div className="space-y-6">
+      {/* ── STUDIO MAP ── */}
+      <div>
+        <button
+          onClick={() => setShowMap(!showMap)}
+          className="flex items-center gap-2 text-you42-blue text-sm font-medium hover:underline mb-3"
+        >
+          <svg className={`w-4 h-4 transition-transform ${showMap ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+          </svg>
+          {showMap ? 'Hide Studio Map' : 'View Studio Map'}
+        </button>
+        {showMap && (
+          <div className="rounded-xl overflow-hidden border border-you42-border mb-4">
+            <img
+              src="/you42-studios-map.webp"
+              alt="You42 Studios 3D Floor Plan"
+              className="w-full h-auto"
+              loading="lazy"
+            />
           </div>
-        ) : dates.length === 0 ? (
-          <p className="text-slate-400 text-sm py-3">No dates available</p>
-        ) : (
-          <MiniCalendar
-            availableDates={dates}
-            selectedDate={selectedDate}
-            onSelect={setSelectedDate}
-          />
         )}
       </div>
 
-      {/* Time slot picker */}
-      {selectedDate && (
-        <div className="mb-4">
-          <label className="text-white text-sm font-medium block mb-2">Select a Time</label>
-          {loadingSlots ? (
-            <div className="flex items-center gap-2 py-3">
-              <div className="w-4 h-4 border-2 border-you42-blue border-t-transparent rounded-full animate-spin" />
-              <span className="text-slate-400 text-sm">Loading times...</span>
+      {/* ── ROOM BOOKING ── */}
+      <div>
+        <h3 className="text-lg font-bold text-white">Book a Room</h3>
+        <p className="text-slate-400 text-xs mt-1">Choose your room, pick a date, then select your time.</p>
+        <div className="border-b border-you42-border mt-2 mb-4" />
+
+        {/* Step 1: Room */}
+        <div className="mb-5">
+          <div className="flex items-center gap-2 mb-3">
+            <span className={`w-5 h-5 rounded-full text-[10px] font-bold flex items-center justify-center ${step >= 1 ? 'bg-you42-blue text-white' : 'bg-you42-surface text-slate-500'}`}>1</span>
+            <label className="text-white text-sm font-medium">Choose a Room</label>
+            {selectedRoom && step > 1 && (
+              <button onClick={() => { setStep(1); setSelectedRoom(null); setSelectedDate(null); setSelectedStartSlotIndex(null); setSlots([]) }} className="text-you42-blue text-xs ml-auto hover:underline">Change</button>
+            )}
+          </div>
+          {step === 1 ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {rooms.map(room => (
+                <button
+                  key={room.id}
+                  onClick={() => handleSelectRoom(room)}
+                  className="p-3 rounded-lg border text-left transition-all bg-you42-surface border-you42-border hover:border-you42-blue/60 hover:bg-you42-surface-hover cursor-pointer group"
+                >
+                  <span className="text-white text-sm font-medium block group-hover:text-you42-blue transition-colors">{room.name}</span>
+                  <span className="text-you42-blue text-xs font-semibold">{formatCurrency(room.allInPrice || room.price)}/hr</span>
+                </button>
+              ))}
             </div>
-          ) : slots.length === 0 ? (
-            <p className="text-slate-400 text-sm py-3">No time slots available for this date</p>
-          ) : (
-            <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
-              {slots.map(slot => {
-                const isSelected = selectedSlot?.id === slot.id
-                const isFull = slot.remaining <= 0
-                return (
-                  <button
-                    key={slot.id}
-                    onClick={() => { setSelectedSlot(slot); setQuantities({}) }}
-                    disabled={isFull}
-                    className={`py-2 px-2 rounded-lg border text-sm font-medium transition-colors ${
-                      isFull
-                        ? 'bg-you42-surface/50 border-you42-border/50 text-slate-600 cursor-not-allowed'
-                        : isSelected
-                          ? 'bg-you42-blue border-you42-blue text-white'
-                          : 'bg-you42-surface border-you42-border text-slate-300 hover:border-you42-blue/50'
-                    }`}
-                  >
-                    {formatSlotTime(slot.startTime)}
-                    {isFull && <span className="block text-[10px] text-slate-500">Full</span>}
-                  </button>
-                )
-              })}
+          ) : selectedRoom && (
+            <div className="ml-7 flex items-center gap-2">
+              <span className="text-white text-sm font-medium">{selectedRoom.name}</span>
+              <span className="text-you42-blue text-xs font-semibold">{formatCurrency(roomPrice)}/hr</span>
             </div>
           )}
         </div>
-      )}
 
-      {/* Ticket types for selected slot */}
-      {selectedSlot && (
-        <div>
-          <label className="text-white text-sm font-medium block mb-2">Select Tickets</label>
-          {availableTicketTypes.length === 0 ? (
-            <p className="text-slate-400 text-sm py-3">No tickets available for this time</p>
-          ) : (
-            <div className="space-y-3">
-              {availableTicketTypes.map(ticket => {
-                const qty = quantities[ticket.id] || 0
-                const maxQty = ticket.maxQuantity || 10
-                return (
-                  <div key={ticket.id} className="flex items-center justify-between gap-4 py-2">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="text-white text-sm font-medium">{ticket.name}</span>
-                        {ticket.badgeText && (
-                          <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded text-white" style={{ backgroundColor: ticket.badgeColor || ticket.backgroundColor || '#555' }}>
-                            {ticket.badgeText}
-                          </span>
-                        )}
+        {/* Step 2: Date */}
+        {step >= 2 && (
+          <div className="mb-5">
+            <div className="flex items-center gap-2 mb-2">
+              <span className={`w-5 h-5 rounded-full text-[10px] font-bold flex items-center justify-center ${step >= 2 ? 'bg-you42-blue text-white' : 'bg-you42-surface text-slate-500'}`}>2</span>
+              <label className="text-white text-sm font-medium">Select a Date</label>
+              {selectedDate && step > 2 && (
+                <button onClick={() => { setStep(2); setSelectedDate(null); setSelectedStartSlotIndex(null); setSlots([]) }} className="text-you42-blue text-xs ml-auto hover:underline">Change</button>
+              )}
+            </div>
+            {step === 2 ? (
+              loadingDates ? (
+                <div className="flex items-center gap-2 py-3 ml-7">
+                  <div className="w-4 h-4 border-2 border-you42-blue border-t-transparent rounded-full animate-spin" />
+                  <span className="text-slate-400 text-sm">Loading dates...</span>
+                </div>
+              ) : dates.length === 0 ? (
+                <p className="text-slate-400 text-sm py-3 ml-7">No dates available</p>
+              ) : (
+                <div className="ml-7">
+                  <MiniCalendar
+                    availableDates={dates}
+                    selectedDate={selectedDate}
+                    onSelect={handleSelectDate}
+                  />
+                </div>
+              )
+            ) : selectedDate && (
+              <p className="text-slate-300 text-sm ml-7">{format(parseISO(selectedDate), 'EEEE, MMMM d, yyyy')}</p>
+            )}
+          </div>
+        )}
+
+        {/* Step 3: Start Time + Duration */}
+        {step >= 3 && (
+          <div className="mb-5">
+            <div className="flex items-center gap-2 mb-2">
+              <span className={`w-5 h-5 rounded-full text-[10px] font-bold flex items-center justify-center ${step >= 3 ? 'bg-you42-blue text-white' : 'bg-you42-surface text-slate-500'}`}>3</span>
+              <label className="text-white text-sm font-medium">Start Time & Duration</label>
+            </div>
+
+            <div className="ml-7 space-y-3">
+              {loadingSlots ? (
+                <div className="flex items-center gap-2 py-3">
+                  <div className="w-4 h-4 border-2 border-you42-blue border-t-transparent rounded-full animate-spin" />
+                  <span className="text-slate-400 text-sm">Loading availability...</span>
+                </div>
+              ) : (
+                <>
+                  {/* Start time grid */}
+                  <div>
+                    <span className="text-slate-400 text-xs block mb-1.5">Start time</span>
+                    {startTimeOptions.length === 0 ? (
+                      <p className="text-slate-400 text-sm py-2">No availability for {selectedRoom?.name} on this date</p>
+                    ) : (
+                      <div className="grid grid-cols-4 gap-2">
+                        {startTimeOptions.map(({ slot, index, maxHours }) => {
+                          const isSelected = selectedStartSlotIndex === index
+                          return (
+                            <button
+                              key={slot.id}
+                              onClick={() => handleSelectStartTime(index)}
+                              className={`py-2 px-2 rounded-lg border text-sm font-medium transition-colors ${
+                                isSelected
+                                  ? 'bg-you42-blue border-you42-blue text-white'
+                                  : 'bg-you42-surface border-you42-border text-slate-300 hover:border-you42-blue/50'
+                              }`}
+                            >
+                              {formatSlotTime(slot.startTime)}
+                              <span className={`block text-[10px] font-normal ${isSelected ? 'text-blue-200' : 'text-slate-500'}`}>up to {maxHours}hr</span>
+                            </button>
+                          )
+                        })}
                       </div>
-                      {ticket.description && (
-                        <p className="text-slate-500 text-xs mt-0.5 line-clamp-1">{ticket.description}</p>
-                      )}
-                      <span className="text-you42-text-secondary text-sm">
-                        {formatCurrency(ticket.allInPrice || ticket.price)}
-                        {ticket.allInPrice && ticket.allInPrice !== ticket.price && (
-                          <span className="text-you42-text-muted text-xs ml-1">(all-in)</span>
-                        )}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        onClick={() => updateQuantity(ticket.id, -1, maxQty)}
-                        disabled={qty <= 0}
-                        className="w-7 h-7 rounded bg-you42-surface text-white text-sm flex items-center justify-center hover:bg-you42-surface-hover disabled:opacity-20 disabled:cursor-not-allowed transition-colors"
-                      >&minus;</button>
-                      <span className="w-6 text-center text-white text-sm font-medium">{qty}</span>
-                      <button
-                        onClick={() => updateQuantity(ticket.id, 1, maxQty)}
-                        disabled={qty >= maxQty}
-                        className="w-7 h-7 rounded bg-you42-surface text-white text-sm flex items-center justify-center hover:bg-you42-surface-hover disabled:opacity-20 disabled:cursor-not-allowed transition-colors"
-                      >+</button>
-                    </div>
+                    )}
                   </div>
-                )
-              })}
+
+                  {/* Duration selector */}
+                  {selectedStartSlotIndex !== null && maxDurationForStart > 0 && (
+                    <div>
+                      <span className="text-slate-400 text-xs block mb-1.5">How long do you need?</span>
+                      <div className="flex gap-2">
+                        {Array.from({ length: maxDurationForStart }, (_, i) => i + 1).map(hrs => (
+                          <button
+                            key={hrs}
+                            onClick={() => setSelectedDuration(hrs)}
+                            className={`flex-1 py-2.5 rounded-lg border text-center transition-colors ${
+                              selectedDuration === hrs
+                                ? 'bg-you42-blue border-you42-blue text-white'
+                                : 'bg-you42-surface border-you42-border text-slate-300 hover:border-you42-blue/50'
+                            }`}
+                          >
+                            <span className="text-sm font-semibold block">{hrs} hr{hrs > 1 ? 's' : ''}</span>
+                            <span className={`text-[10px] font-normal ${selectedDuration === hrs ? 'text-blue-200' : 'text-slate-500'}`}>{formatCurrency(roomPrice * hrs)}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
-          )}
+          </div>
+        )}
+
+        {/* Booking Summary + Add to Cart */}
+        {bookingSummary && (
+          <div className="bg-you42-surface rounded-lg border border-you42-border p-4">
+            <p className="text-white text-sm font-semibold mb-2">Booking Summary</p>
+            <div className="space-y-1 text-sm">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Room</span>
+                <span className="text-white">{bookingSummary.room}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Date</span>
+                <span className="text-white">{format(parseISO(bookingSummary.date), 'MMM d, yyyy')}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Time</span>
+                <span className="text-white">{formatSlotTime(bookingSummary.startTime)} – {formatSlotTime(bookingSummary.endTime)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Duration</span>
+                <span className="text-white">{bookingSummary.duration} hour{bookingSummary.duration > 1 ? 's' : ''}</span>
+              </div>
+              <div className="border-t border-you42-border mt-2 pt-2 flex justify-between">
+                <span className="text-white font-semibold">Total</span>
+                <span className="text-you42-blue font-bold">{formatCurrency(bookingSummary.total)}</span>
+              </div>
+            </div>
+
+            <button
+              onClick={handleAddToCart}
+              disabled={isLoading}
+              className="w-full mt-3 bg-you42-blue hover:bg-you42-blue-hover disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium py-2.5 rounded transition-colors"
+            >
+              {isLoading ? 'Booking...' : `Book ${bookingSummary.room} – ${formatCurrency(bookingSummary.total)}`}
+            </button>
+          </div>
+        )}
+
+        {error && <p className="text-red-400 text-xs mt-3">{error}</p>}
+        {addingSuccess && <p className="text-green-400 text-xs mt-3">Added to cart!</p>}
+      </div>
+
+      {/* ── PASSES SECTION ── */}
+      {passes.length > 0 && (
+        <div>
+          <h3 className="text-lg font-bold text-white">Studio Passes</h3>
+          <p className="text-slate-400 text-xs mt-1">Premium all-access bundles with extended time and perks.</p>
+          <div className="border-b border-you42-border mt-2 mb-4" />
+
+          <div className="space-y-3">
+            {passes.map(pass => {
+              const qty = passQuantities[pass.id] || 0
+              const maxQty = pass.maxQuantity || 4
+              return (
+                <div key={pass.id} className="flex items-center justify-between gap-4 p-3 bg-you42-surface rounded-lg border border-you42-border">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-white text-sm font-medium">{pass.name}</span>
+                      {pass.badgeText && (
+                        <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded text-white" style={{ backgroundColor: pass.badgeColor || '#555' }}>
+                          {pass.badgeText}
+                        </span>
+                      )}
+                    </div>
+                    {pass.description && (
+                      <p className="text-slate-500 text-xs mt-0.5 line-clamp-2">{pass.description}</p>
+                    )}
+                    <span className="text-you42-blue text-sm font-semibold">{formatCurrency(pass.allInPrice || pass.price)}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      onClick={() => updatePassQty(pass.id, -1, maxQty)}
+                      disabled={qty <= 0}
+                      className="w-7 h-7 rounded bg-you42-bg text-white text-sm flex items-center justify-center hover:bg-you42-surface-hover disabled:opacity-20 disabled:cursor-not-allowed transition-colors"
+                    >&minus;</button>
+                    <span className="w-6 text-center text-white text-sm font-medium">{qty}</span>
+                    <button
+                      onClick={() => updatePassQty(pass.id, 1, maxQty)}
+                      disabled={qty >= maxQty}
+                      className="w-7 h-7 rounded bg-you42-bg text-white text-sm flex items-center justify-center hover:bg-you42-surface-hover disabled:opacity-20 disabled:cursor-not-allowed transition-colors"
+                    >+</button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          <button
+            onClick={handleAddPasses}
+            disabled={totalPassesSelected === 0 || isLoading}
+            className="w-full mt-4 bg-you42-blue hover:bg-you42-blue-hover disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium py-2.5 rounded transition-colors"
+          >
+            {isLoading ? 'Adding...' :
+             totalPassesSelected > 0
+               ? `Add ${totalPassesSelected} Pass${totalPassesSelected > 1 ? 'es' : ''} to Cart`
+               : 'Select a Pass'}
+          </button>
         </div>
       )}
-
-      {error && <p className="text-red-400 text-xs mt-3">{error}</p>}
-      {addingSuccess && <p className="text-green-400 text-xs mt-3">Added to cart!</p>}
-
-      <button
-        onClick={handleAddToCart}
-        disabled={totalSelected === 0 || !selectedSlot || isLoading}
-        className="w-full mt-5 bg-you42-blue hover:bg-you42-blue-hover disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium py-2.5 rounded transition-colors"
-      >
-        {isLoading ? 'Adding...' :
-         totalSelected > 0
-           ? `Add ${totalSelected} Ticket${totalSelected > 1 ? 's' : ''} to Cart`
-           : 'Select Tickets'}
-      </button>
     </div>
   )
 }

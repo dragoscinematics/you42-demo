@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useCart } from '../../context/CartContext'
 import CartItem from './CartItem'
@@ -6,9 +6,46 @@ import CartSummary from './CartSummary'
 import PromoCode from './PromoCode'
 import Spinner from '../ui/Spinner'
 
+function CartTimer({ expiresAt }) {
+  const [timeLeft, setTimeLeft] = useState('')
+  const [urgent, setUrgent] = useState(false)
+
+  useEffect(() => {
+    if (!expiresAt) return
+    const update = () => {
+      const now = Date.now()
+      const exp = new Date(expiresAt).getTime()
+      const diff = exp - now
+      if (diff <= 0) {
+        setTimeLeft('0:00')
+        setUrgent(true)
+        return
+      }
+      const mins = Math.floor(diff / 60000)
+      const secs = Math.floor((diff % 60000) / 1000)
+      setTimeLeft(`${mins}:${String(secs).padStart(2, '0')}`)
+      setUrgent(mins < 2)
+    }
+    update()
+    const interval = setInterval(update, 1000)
+    return () => clearInterval(interval)
+  }, [expiresAt])
+
+  if (!expiresAt || !timeLeft) return null
+
+  return (
+    <div className={`flex items-center gap-1.5 text-xs font-medium ${urgent ? 'text-red-400' : 'text-amber-400'}`}>
+      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+      </svg>
+      <span>{timeLeft} remaining</span>
+    </div>
+  )
+}
+
 export default function CartDrawer() {
   const {
-    items, isOpen, isLoading, error,
+    items, isOpen, isLoading, error, expiresAt,
     closeDrawer, refreshCart,
   } = useCart()
   const navigate = useNavigate()
@@ -43,9 +80,16 @@ export default function CartDrawer() {
       >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-you42-border">
-          <span className="text-white font-bold">
-            Cart {itemCount > 0 && <span className="text-you42-text-secondary font-normal text-sm">({itemCount})</span>}
-          </span>
+          <div>
+            <span className="text-white font-bold">
+              Cart {itemCount > 0 && <span className="text-you42-text-secondary font-normal text-sm">({itemCount})</span>}
+            </span>
+            {items.length > 0 && expiresAt && (
+              <div className="mt-0.5">
+                <CartTimer expiresAt={expiresAt} />
+              </div>
+            )}
+          </div>
           <button onClick={closeDrawer} className="text-you42-text-secondary hover:text-white transition-colors text-xl leading-none">
             &times;
           </button>
