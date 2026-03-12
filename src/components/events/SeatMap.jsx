@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from 'react'
 import { API_KEY } from '../../config/constants'
 
 const EMBED_ORIGIN = 'https://staging.phantomticket.com'
 
-export default function SeatMap({ eventId, onSelectionChange, onReady }) {
+const SeatMap = forwardRef(function SeatMap({ eventId, onSelectionChange, onReady }, ref) {
   const iframeRef = useRef(null)
   const [loading, setLoading] = useState(true)
 
@@ -26,7 +26,6 @@ export default function SeatMap({ eventId, onSelectionChange, onReady }) {
     return () => window.removeEventListener('message', handleMessage)
   }, [onSelectionChange, onReady])
 
-  // Fallback: hide spinner after timeout if PT_SEAT_MAP_READY never fires
   const handleIframeLoad = useCallback(() => {
     setTimeout(() => setLoading(false), 4000)
   }, [])
@@ -35,14 +34,10 @@ export default function SeatMap({ eventId, onSelectionChange, onReady }) {
     iframeRef.current?.contentWindow?.postMessage({ type, payload }, EMBED_ORIGIN)
   }, [])
 
-  // Expose commands for parent
-  useEffect(() => {
-    const el = iframeRef.current
-    if (el) {
-      el.clearSelection = () => sendCommand('PT_CLEAR_SELECTION')
-      el.setSelection = (seatIds) => sendCommand('PT_SET_SELECTION', { seatIds })
-    }
-  }, [sendCommand])
+  useImperativeHandle(ref, () => ({
+    clearSelection: () => sendCommand('PT_CLEAR_SELECTION'),
+    setSelection: (seatIds) => sendCommand('PT_SET_SELECTION', { seatIds }),
+  }), [sendCommand])
 
   return (
     <div className="relative w-full rounded-lg overflow-hidden border border-white/10">
@@ -65,4 +60,6 @@ export default function SeatMap({ eventId, onSelectionChange, onReady }) {
       />
     </div>
   )
-}
+})
+
+export default SeatMap

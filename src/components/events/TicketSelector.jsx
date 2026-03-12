@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useCart } from '../../context/CartContext'
 import { formatCurrency } from '../../utils/formatCurrency'
 import SeatMap from './SeatMap'
@@ -52,6 +52,7 @@ function matchCategoryToTicketType(categoryName, ticketTypes) {
 
 function ReservedSeatingSelector({ event }) {
   const { addItem, isLoading, setTicketTypePrices } = useCart()
+  const seatMapRef = useRef(null)
   const [selection, setSelection] = useState(null) // from PT_SEAT_SELECTION_CHANGED
   const [error, setError] = useState(null)
   const [addingSuccess, setAddingSuccess] = useState(false)
@@ -113,6 +114,7 @@ function ReservedSeatingSelector({ event }) {
           quantity: group.count,
         })
       }
+      seatMapRef.current?.clearSelection()
       setSelection(null)
       setAddingSuccess(true)
       setTimeout(() => setAddingSuccess(false), 3000)
@@ -127,6 +129,7 @@ function ReservedSeatingSelector({ event }) {
       <div className="border-b border-you42-border mt-2 mb-4" />
 
       <SeatMap
+        ref={seatMapRef}
         eventId={event.id}
         onSelectionChange={handleSelectionChange}
         onReady={handleReady}
