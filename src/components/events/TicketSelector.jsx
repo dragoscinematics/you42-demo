@@ -1,8 +1,10 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useCart } from '../../context/CartContext'
 import { formatCurrency } from '../../utils/formatCurrency'
 import { getAvailableDates, getAvailableSlots } from '../../api/events'
-import { format, parseISO, addMonths, startOfMonth, endOfMonth, startOfWeek, endOfWeek, addDays, isSameMonth, isSameDay, subMonths } from 'date-fns'
+import { format, parseISO, addMonths } from 'date-fns'
+import { formatSlotTime } from '../../utils/formatTime'
 import SeatMap from './SeatMap'
 
 // Fuzzy match category name to ticket type name
@@ -54,10 +56,10 @@ function matchCategoryToTicketType(categoryName, ticketTypes) {
 
 function ReservedSeatingSelector({ event }) {
   const { addItem, isLoading, setTicketTypePrices } = useCart()
+  const navigate = useNavigate()
   const seatMapRef = useRef(null)
   const [selection, setSelection] = useState(null) // from PT_SEAT_SELECTION_CHANGED
   const [error, setError] = useState(null)
-  const [addingSuccess, setAddingSuccess] = useState(false)
 
   const ticketTypes = event.ticketTypes || []
 
@@ -101,7 +103,7 @@ function ReservedSeatingSelector({ event }) {
 
   const handleAddToCart = async () => {
     setError(null)
-    setAddingSuccess(false)
+
     if (selectedSeats.length === 0) return
 
     try {
@@ -118,8 +120,7 @@ function ReservedSeatingSelector({ event }) {
       }
       seatMapRef.current?.clearSelection()
       setSelection(null)
-      setAddingSuccess(true)
-      setTimeout(() => setAddingSuccess(false), 3000)
+      navigate('/checkout')
     } catch (err) {
       setError(err.message)
     }
@@ -158,7 +159,7 @@ function ReservedSeatingSelector({ event }) {
       )}
 
       {error && <p className="text-red-400 text-xs mt-3">{error}</p>}
-      {addingSuccess && <p className="text-green-400 text-xs mt-3">Added to cart!</p>}
+
 
       <button
         onClick={handleAddToCart}
@@ -176,9 +177,9 @@ function ReservedSeatingSelector({ event }) {
 
 function StandardTicketSelector({ event }) {
   const { addItem, isLoading, setTicketTypePrices } = useCart()
+  const navigate = useNavigate()
   const [quantities, setQuantities] = useState({})
   const [error, setError] = useState(null)
-  const [addingSuccess, setAddingSuccess] = useState(false)
 
   const ticketTypes = event.ticketTypes || []
 
@@ -201,7 +202,7 @@ function StandardTicketSelector({ event }) {
 
   const handleAddToCart = async () => {
     setError(null)
-    setAddingSuccess(false)
+
     const selectedTickets = Object.entries(quantities).filter(([, qty]) => qty > 0)
     if (selectedTickets.length === 0) return
 
@@ -210,8 +211,7 @@ function StandardTicketSelector({ event }) {
         await addItem({ eventId: event.id, ticketTypeId, quantity })
       }
       setQuantities({})
-      setAddingSuccess(true)
-      setTimeout(() => setAddingSuccess(false), 3000)
+      navigate('/checkout')
     } catch (err) {
       setError(err.message)
     }
@@ -288,7 +288,6 @@ function StandardTicketSelector({ event }) {
       </div>
 
       {error && <p className="text-you42-error text-xs mt-3">{error}</p>}
-      {addingSuccess && <p className="text-you42-success text-xs mt-3">Added to cart!</p>}
 
       <button
         onClick={handleAddToCart}
@@ -303,70 +302,68 @@ function StandardTicketSelector({ event }) {
   )
 }
 
-function formatSlotTime(time) {
-  const [h, m] = time.split(':').map(Number)
-  const ampm = h >= 12 ? 'PM' : 'AM'
-  const hour = h % 12 || 12
-  return m === 0 ? `${hour} ${ampm}` : `${hour}:${String(m).padStart(2, '0')} ${ampm}`
-}
-
-function MiniCalendar({ availableDates, selectedDate, onSelect }) {
-  const availableSet = useMemo(() => new Set(availableDates), [availableDates])
-  const initialMonth = selectedDate ? parseISO(selectedDate) : new Date()
-  const [currentMonth, setCurrentMonth] = useState(startOfMonth(initialMonth))
-
-  const weeks = useMemo(() => {
-    const start = startOfWeek(startOfMonth(currentMonth))
-    const end = endOfWeek(endOfMonth(currentMonth))
-    const rows = []
-    let day = start
-    while (day <= end) {
-      const week = []
-      for (let i = 0; i < 7; i++) {
-        week.push(day)
-        day = addDays(day, 1)
-      }
-      rows.push(week)
+function DatePicker({ availableDates, selectedDate, onSelect }) {
+  // Group available dates by month
+  const monthGroups = useMemo(() => {
+    const groups = {}
+    for (const dateStr of availableDates) {
+      const d = parseISO(dateStr)
+      const key = format(d, 'yyyy-MM')
+      if (!groups[key]) groups[key] = { label: format(d, 'MMMM yyyy'), dates: [] }
+      groups[key].dates.push(dateStr)
     }
-    return rows
-  }, [currentMonth])
+    return Object.values(groups)
+  }, [availableDates])
+
+  const monthOptions = monthGroups.map(g => g.label)
+  const [selectedMonthIdx, setSelectedMonthIdx] = useState(0)
+  const currentGroup = monthGroups[selectedMonthIdx] || monthGroups[0]
 
   return (
-    <div className="bg-you42-surface rounded-lg border border-you42-border p-3 max-w-xs">
-      <div className="flex items-center justify-between mb-2">
-        <button onClick={() => setCurrentMonth(subMonths(currentMonth, 1))} className="text-slate-400 hover:text-white p-1 text-sm">&larr;</button>
-        <span className="text-white text-sm font-semibold">{format(currentMonth, 'MMMM yyyy')}</span>
-        <button onClick={() => setCurrentMonth(addMonths(currentMonth, 1))} className="text-slate-400 hover:text-white p-1 text-sm">&rarr;</button>
-      </div>
-      <div className="grid grid-cols-7 gap-0.5 text-center">
-        {['Su','Mo','Tu','We','Th','Fr','Sa'].map(d => (
-          <div key={d} className="text-slate-500 text-[10px] font-medium py-1">{d}</div>
-        ))}
-        {weeks.flat().map((day, i) => {
-          const dateStr = format(day, 'yyyy-MM-dd')
-          const inMonth = isSameMonth(day, currentMonth)
-          const isAvailable = availableSet.has(dateStr)
-          const isSelected = selectedDate === dateStr
-          const isPast = day < new Date(new Date().toDateString())
-
-          return (
+    <div className="space-y-3">
+      {/* Month selector */}
+      {monthGroups.length > 1 && (
+        <div className="flex gap-2">
+          {monthOptions.map((label, idx) => (
             <button
-              key={i}
-              onClick={() => isAvailable && onSelect(dateStr)}
-              disabled={!isAvailable || !inMonth}
-              className={`w-8 h-8 rounded-full text-xs font-medium transition-colors ${
-                !inMonth ? 'text-transparent cursor-default' :
-                isSelected ? 'bg-you42-blue text-white' :
-                isAvailable ? 'text-white hover:bg-you42-blue/30 cursor-pointer' :
-                isPast ? 'text-slate-700 cursor-default' :
-                'text-slate-600 cursor-default'
+              key={label}
+              onClick={() => setSelectedMonthIdx(idx)}
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                idx === selectedMonthIdx
+                  ? 'bg-you42-blue text-white'
+                  : 'bg-you42-surface border border-you42-border text-slate-300 hover:border-you42-blue/50'
               }`}
             >
-              {format(day, 'd')}
+              {label}
             </button>
-          )
-        })}
-      </div>
+          ))}
+        </div>
+      )}
+
+      {/* Date grid */}
+      {currentGroup && (
+        <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+          {currentGroup.dates.map(dateStr => {
+            const d = parseISO(dateStr)
+            const isSelected = selectedDate === dateStr
+            return (
+              <button
+                key={dateStr}
+                onClick={() => onSelect(dateStr)}
+                className={`p-3 rounded-lg border text-left transition-all ${
+                  isSelected
+                    ? 'bg-you42-blue border-you42-blue text-white'
+                    : 'bg-you42-surface border-you42-border hover:border-you42-blue/60 hover:bg-you42-surface-hover cursor-pointer'
+                }`}
+              >
+                <span className={`block text-sm font-medium ${isSelected ? 'text-white' : 'text-white'}`}>
+                  {format(d, 'EEE, MMM d')}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
@@ -412,8 +409,10 @@ function getMaxConsecutiveHours(slots, startIndex, roomTicketTypeId) {
   return count
 }
 
+
 function TimedEntrySelector({ event }) {
-  const { addItem, isLoading, setTicketTypePrices } = useCart()
+  const { addItem, addItems, isLoading, setTicketTypePrices } = useCart()
+  const navigate = useNavigate()
   const [dates, setDates] = useState([])
   const [selectedDate, setSelectedDate] = useState(null)
   const [slots, setSlots] = useState([])
@@ -423,8 +422,7 @@ function TimedEntrySelector({ event }) {
   const [loadingDates, setLoadingDates] = useState(true)
   const [loadingSlots, setLoadingSlots] = useState(false)
   const [error, setError] = useState(null)
-  const [addingSuccess, setAddingSuccess] = useState(false)
-  const [showMap, setShowMap] = useState(false)
+  const dateStepRef = useRef(null)
   // Flow: 1=room, 2=date, 3=time+duration
   const [step, setStep] = useState(1)
 
@@ -483,7 +481,7 @@ function TimedEntrySelector({ event }) {
   const maxDurationForStart = useMemo(() => {
     if (selectedStartSlotIndex === null) return 0
     const opt = startTimeOptions.find(o => o.index === selectedStartSlotIndex)
-    return Math.min(opt?.maxHours || 0, 5)
+    return Math.min(opt?.maxHours || 0, 8)
   }, [selectedStartSlotIndex, startTimeOptions])
 
   useEffect(() => {
@@ -519,6 +517,10 @@ function TimedEntrySelector({ event }) {
     setSelectedStartSlotIndex(null)
     setSlots([])
     setStep(2)
+    // Scroll to date step
+    setTimeout(() => {
+      dateStepRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 100)
   }
 
   const handleSelectDate = (date) => {
@@ -531,35 +533,29 @@ function TimedEntrySelector({ event }) {
   const handleSelectStartTime = (index) => {
     setSelectedStartSlotIndex(index)
     const opt = startTimeOptions.find(o => o.index === index)
-    const max = Math.min(opt?.maxHours || 1, 5)
+    const max = Math.min(opt?.maxHours || 1, 8)
     if (selectedDuration > max) setSelectedDuration(max)
     if (selectedDuration === 0) setSelectedDuration(1)
   }
 
   const handleAddToCart = async () => {
     setError(null)
-    setAddingSuccess(false)
+
     if (!bookingSummary) return
 
     try {
-      for (const slotId of bookingSummary.slotIds) {
-        await addItem({
-          eventId: event.id,
-          ticketTypeId: selectedRoom.id,
-          quantity: 1,
-          timeSlotId: slotId,
-          timeSlotDate: selectedDate,
-        })
-      }
-      setAddingSuccess(true)
-      // Reset to room selection for another booking
-      setSelectedDate(null)
-      setSelectedDuration(1)
-      setSelectedStartSlotIndex(null)
-      setSlots([])
-      setStep(1)
-      setSelectedRoom(null)
-      setTimeout(() => setAddingSuccess(false), 3000)
+      const bookingGroup = crypto.randomUUID()
+      const bookedSlots = slots.slice(selectedStartSlotIndex, selectedStartSlotIndex + selectedDuration)
+      await addItems(bookedSlots.map(slot => ({
+        eventId: event.id,
+        ticketTypeId: selectedRoom.id,
+        quantity: 1,
+        timeSlotId: slot.id,
+        timeSlotDate: selectedDate,
+        bookingGroup,
+        slotMeta: { startTime: slot.startTime, endTime: slot.endTime, date: selectedDate },
+      })))
+      navigate('/checkout')
     } catch (err) {
       setError(err.message)
     }
@@ -584,8 +580,7 @@ function TimedEntrySelector({ event }) {
         await addItem({ eventId: event.id, ticketTypeId, quantity })
       }
       setPassQuantities({})
-      setAddingSuccess(true)
-      setTimeout(() => setAddingSuccess(false), 3000)
+      navigate('/checkout')
     } catch (err) {
       setError(err.message)
     }
@@ -593,29 +588,6 @@ function TimedEntrySelector({ event }) {
 
   return (
     <div className="space-y-6">
-      {/* ── STUDIO MAP ── */}
-      <div>
-        <button
-          onClick={() => setShowMap(!showMap)}
-          className="flex items-center gap-2 text-you42-blue text-sm font-medium hover:underline mb-3"
-        >
-          <svg className={`w-4 h-4 transition-transform ${showMap ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-          </svg>
-          {showMap ? 'Hide Studio Map' : 'View Studio Map'}
-        </button>
-        {showMap && (
-          <div className="rounded-xl overflow-hidden border border-you42-border mb-4">
-            <img
-              src="/you42-studios-map.webp"
-              alt="You42 Studios 3D Floor Plan"
-              className="w-full h-auto"
-              loading="lazy"
-            />
-          </div>
-        )}
-      </div>
-
       {/* ── ROOM BOOKING ── */}
       <div>
         <h3 className="text-lg font-bold text-white">Book a Room</h3>
@@ -654,7 +626,7 @@ function TimedEntrySelector({ event }) {
 
         {/* Step 2: Date */}
         {step >= 2 && (
-          <div className="mb-5">
+          <div className="mb-5" ref={dateStepRef}>
             <div className="flex items-center gap-2 mb-2">
               <span className={`w-5 h-5 rounded-full text-[10px] font-bold flex items-center justify-center ${step >= 2 ? 'bg-you42-blue text-white' : 'bg-you42-surface text-slate-500'}`}>2</span>
               <label className="text-white text-sm font-medium">Select a Date</label>
@@ -671,8 +643,8 @@ function TimedEntrySelector({ event }) {
               ) : dates.length === 0 ? (
                 <p className="text-slate-400 text-sm py-3 ml-7">No dates available</p>
               ) : (
-                <div className="ml-7">
-                  <MiniCalendar
+                <div>
+                  <DatePicker
                     availableDates={dates}
                     selectedDate={selectedDate}
                     onSelect={handleSelectDate}
@@ -795,7 +767,7 @@ function TimedEntrySelector({ event }) {
         )}
 
         {error && <p className="text-red-400 text-xs mt-3">{error}</p>}
-        {addingSuccess && <p className="text-green-400 text-xs mt-3">Added to cart!</p>}
+  
       </div>
 
       {/* ── PASSES SECTION ── */}

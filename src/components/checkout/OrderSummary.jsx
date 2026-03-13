@@ -1,5 +1,47 @@
 import { formatCurrency } from '../../utils/formatCurrency'
+import { formatSlotTime, calcDurationHours, formatDuration } from '../../utils/formatTime'
 import { useCart } from '../../context/CartContext'
+
+function groupOrderItems(items) {
+  const groups = []
+  const used = new Set()
+
+  for (let i = 0; i < items.length; i++) {
+    if (used.has(i)) continue
+    const item = items[i]
+    const hasTimeSlot = item.timeSlot || item.timeSlotId
+
+    if (hasTimeSlot) {
+      const ticketTypeId = item.ticketTypeId || item.ticketType?.id
+      const date = item.timeSlot?.date || item.timeSlotDate || ''
+      const groupItems = [item]
+      used.add(i)
+
+      for (let j = i + 1; j < items.length; j++) {
+        if (used.has(j)) continue
+        const other = items[j]
+        const otherTTId = other.ticketTypeId || other.ticketType?.id
+        const otherDate = other.timeSlot?.date || other.timeSlotDate || ''
+        if (otherTTId === ticketTypeId && otherDate === date) {
+          groupItems.push(other)
+          used.add(j)
+        }
+      }
+
+      groupItems.sort((a, b) => {
+        const aTime = a.timeSlot?.startTime || ''
+        const bTime = b.timeSlot?.startTime || ''
+        return aTime.localeCompare(bTime)
+      })
+
+      groups.push({ isGroup: groupItems.length > 1, items: groupItems })
+    } else {
+      used.add(i)
+      groups.push({ isGroup: false, items: [item] })
+    }
+  }
+  return groups
+}
 
 export default function OrderSummary({ items, totals, promoCode }) {
   const { ticketTypePriceMap } = useCart()
@@ -19,6 +61,8 @@ export default function OrderSummary({ items, totals, promoCode }) {
   const baseSubtotal = totals.subtotal || items.reduce((sum, item) => sum + ((item.priceAtTime || 0) * item.quantity), 0)
   const displayTotal = allInTotal - (totals.discount || 0)
 
+  const grouped = groupOrderItems(items)
+
   return (
     <div className="bg-you42-surface rounded-xl border border-you42-border overflow-hidden">
       <div className="p-5 border-b border-you42-border">
@@ -26,7 +70,35 @@ export default function OrderSummary({ items, totals, promoCode }) {
       </div>
 
       <div className="p-5 space-y-3">
-        {items.map(item => {
+        {grouped.map((group, gi) => {
+          if (group.isGroup) {
+            const first = group.items[0]
+            const ticketTypeId = first.ticketTypeId || first.ticketType?.id
+            const priceInfo = ticketTypePriceMap[ticketTypeId]
+            const allInPrice = priceInfo?.allInPrice || first.priceAtTime || 0
+            const firstSlot = first.timeSlot
+            const lastSlot = group.items[group.items.length - 1].timeSlot
+            const hours = calcDurationHours(firstSlot?.startTime, lastSlot?.endTime) || group.items.length
+            return (
+              <div key={`group-${gi}`} className="flex justify-between items-start">
+                <div className="flex-1 min-w-0">
+                  <p className="text-white text-sm font-medium truncate">
+                    {first.ticketType?.name || first.ticketTypeName}
+                  </p>
+                  <p className="text-you42-text-secondary text-xs">
+                    {formatDuration(hours)}
+                    {firstSlot?.startTime && lastSlot?.endTime && (
+                      <> &middot; {formatSlotTime(firstSlot.startTime)} – {formatSlotTime(lastSlot.endTime)}</>
+                    )}
+                  </p>
+                </div>
+                <span className="text-white text-sm font-medium shrink-0 ml-3">
+                  {formatCurrency(allInPrice * hours)}
+                </span>
+              </div>
+            )
+          }
+          const item = group.items[0]
           const ticketTypeId = item.ticketTypeId || item.ticketType?.id
           const priceInfo = ticketTypePriceMap[ticketTypeId]
           const allInPrice = priceInfo?.allInPrice || item.priceAtTime || 0

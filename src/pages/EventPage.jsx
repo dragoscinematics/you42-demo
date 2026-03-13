@@ -57,7 +57,7 @@ export default function EventPage() {
         {needsFullWidth ? (
           <div className="space-y-10">
             <TicketSelector event={event} />
-            <EventInfo event={event} />
+            {!isTimedEntry && <EventInfo event={event} />}
           </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-5 gap-10">

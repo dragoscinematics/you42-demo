@@ -4,16 +4,33 @@ import { getSessionId } from '../utils/session'
 export async function getCart() {
   const sessionId = getSessionId()
   const data = await api.get('/cart', { sessionId })
-  return data.data || data.cart
+  const cart = data.data || data.cart
+  return cart
 }
 
-export async function addToCart({ eventId, ticketTypeId, quantity, timeSlotId, timeSlotDate }) {
+export async function addToCart({ eventId, ticketTypeId, quantity, timeSlotId, timeSlotDate, bookingGroup }) {
   const sessionId = getSessionId()
   const body = { sessionId, eventId, ticketTypeId, quantity }
   if (timeSlotId) body.timeSlotId = timeSlotId
   if (timeSlotDate) body.timeSlotDate = timeSlotDate
+  if (bookingGroup) body.bookingGroup = bookingGroup
   const data = await api.post('/cart/items', body)
   return data.data || data.cart
+}
+
+export async function addToCartBulk(items) {
+  const sessionId = getSessionId()
+  const data = await api.post('/cart/items/bulk', {
+    sessionId,
+    items: items.map(({ eventId, ticketTypeId, quantity, timeSlotId, timeSlotDate, bookingGroup }) => {
+      const item = { eventId, ticketTypeId, quantity }
+      if (timeSlotId) item.timeSlotId = timeSlotId
+      if (timeSlotDate) item.timeSlotDate = timeSlotDate
+      if (bookingGroup) item.bookingGroup = bookingGroup
+      return item
+    }),
+  })
+  return data
 }
 
 export async function updateCartItem(itemId, quantity) {
@@ -24,10 +41,8 @@ export async function updateCartItem(itemId, quantity) {
 
 export async function removeCartItem(itemId) {
   const sessionId = getSessionId()
-  await api.delete(`/cart/items/${itemId}`, { sessionId })
-  // API returns stale data with the item still present, so fetch fresh cart
-  const fresh = await api.get('/cart', { sessionId })
-  return fresh.data || fresh.cart
+  const data = await api.delete(`/cart/items/${itemId}`, { sessionId })
+  return data.data || data.cart
 }
 
 export async function clearCart() {

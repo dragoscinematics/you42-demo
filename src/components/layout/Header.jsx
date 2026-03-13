@@ -1,8 +1,10 @@
 import { Link } from 'react-router-dom'
 import { useCart } from '../../context/CartContext'
+import { useAuth } from '../../context/AuthContext'
 
 export default function Header() {
   const { items, toggleDrawer } = useCart()
+  const { isAuthenticated, customer } = useAuth()
   const itemCount = items.reduce((sum, item) => sum + item.quantity, 0)
 
   return (
@@ -60,12 +62,23 @@ export default function Header() {
                 )}
               </button>
 
-              <a href="https://you42.com" className="hidden sm:block text-you42-blue hover:text-white transition-colors text-sm">
-                Log in
-              </a>
-              <a href="https://you42.com" className="hidden sm:block border border-you42-blue text-you42-blue hover:bg-you42-blue hover:text-white text-sm px-3 py-1 rounded transition-colors">
-                Sign Up
-              </a>
+              {isAuthenticated ? (
+                <Link to="/account" className="hidden sm:flex items-center gap-2 text-[#ccc] hover:text-white transition-colors text-sm">
+                  <span className="w-6 h-6 rounded-full bg-you42-blue text-white text-[10px] font-bold flex items-center justify-center">
+                    {(customer?.firstName?.[0] || '').toUpperCase()}{(customer?.lastName?.[0] || '').toUpperCase()}
+                  </span>
+                  <span>{customer?.firstName || 'Account'}</span>
+                </Link>
+              ) : (
+                <>
+                  <Link to="/login" className="hidden sm:block text-you42-blue hover:text-white transition-colors text-sm">
+                    Log in
+                  </Link>
+                  <Link to="/register" className="hidden sm:block border border-you42-blue text-you42-blue hover:bg-you42-blue hover:text-white text-sm px-3 py-1 rounded transition-colors">
+                    Sign Up
+                  </Link>
+                </>
+              )}
             </div>
           </div>
         </div>
